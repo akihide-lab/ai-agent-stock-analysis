@@ -1,0 +1,36 @@
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.env
+.env.*
+!.env.example
+
+# Local secrets / credentials
+*.pem
+*.key
+*.p12
+*.pfx
+id_rsa
+id_rsa.*
+id_ed25519
+id_ed25519.*
+credentials.json
+client_secret*.json
+token*.json
+secrets.*
+*.secret
+
+# Generated/runtime files
+logs/*
+!logs/.gitkeep
+reports/*
+!reports/.gitkeep
+
+# Local databases and backups
+data/*.db
+data/*.sqlite
+data/*.sqlite3
+data/backups/

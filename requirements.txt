@@ -1,0 +1,9 @@
+matplotlib
+markdown-it-py
+chromadb
+numpy
+pandas
+scikit-learn
+statsmodels
+xgboost
+yfinance
