@@ -1,3 +1,5 @@
+beautifulsoup4
+requests
 matplotlib
 markdown-it-py
 chromadb

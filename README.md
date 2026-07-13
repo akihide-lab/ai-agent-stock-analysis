@@ -1,199 +1,183 @@
-# 株の銘柄分析
+# 株の銘柄分析 AI エージェント
 
-SQLiteの承認済みVIEWと既存Python分析ロジックを利用し、銘柄分析レポートを
-Markdownで生成するローカルCLIプロジェクトです。
+## 1. プロジェクト概要
 
-## AIエージェント実行
+このリポジトリは、AI エージェントによる株式分析システムの設計・オーケストレーション・分析フローを公開するポートフォリオです。
 
-初心者の自然言語質問から、Intent / Entity / 不足情報を判定し、銘柄選定から
-HTMLレポート生成まで実行します。
+自然言語の依頼を受け取り、株式関連の依頼かどうかを判定し、Intent / Entity / Missing Information を整理したうえで、適切な Workflow にルーティングします。情報が不足している場合は分析へ進まず、追加質問で停止する設計にしています。
 
-```powershell
-.\.venv\Scripts\python.exe .\scripts\question_agent.py "初心者向けにおすすめの株を選んで"
+実運用では SQLite の株価・財務・マクロ経済データベースと承認済み VIEW を使い、日本株の銘柄検索、単一銘柄分析、HTML レポート生成を行います。
+
+この公開版では、主に以下の構造を確認できます。
+
+- AI オーケストレーション構造
+- Domain / Intent / Entity 処理
+- 情報不足時の停止制御
+- Workflow / Dispatcher 構造
+- State 管理
+- 自動テスト
+
+## 2. システム構成図
+
+```mermaid
+flowchart TD
+    A["User Question"] --> B["Domain Router"]
+    B -->|stock| C["Pre-DB Classification"]
+    B -->|not stock / unknown| X["Follow-up or General Stop"]
+    C -->|insufficient / ambiguous| Y["Follow-up Required"]
+    C -->|classified| D["Stock Name Resolver"]
+    D --> E["Intent / Entity / Missing Info"]
+    E -->|missing required info| Y
+    E -->|ready| F["Workflow Selector"]
+    F --> G["Dispatcher"]
+    G -->|single stock analysis| H["Report Generation Flow"]
+    G -->|screening| I["Candidate Selection Flow"]
+    H --> J["HTML Report Path"]
+    I --> H
+    J --> K["Decision Log"]
 ```
 
-動作確認でWeb更新を省略し、既存DBだけでレポートを作る場合:
+主要な責務:
 
-```powershell
-.\.venv\Scripts\python.exe .\scripts\question_agent.py "初心者向けにおすすめの株を選んで" --skip-web-update
-```
+- `stock_domain_router.py`: 株式関連依頼かどうかの入口判定
+- `question_agent.py`: CLI 入口、分類、銘柄解決、ログ出力
+- `orchestrator.py`: 状態遷移と Workflow 選択
+- `workflows.py`: Workflow 定義
+- `dispatcher.py`: 選択された Workflow の実行
+- `generate_stock_report.py`: 既存 DB VIEW から HTML レポートを生成
+- `update_market_data.py`: 既存 DB の市場データ更新
+- `update_macro_from_existing.py`: CSV 由来のマクロデータ更新
 
-質問文に銘柄コードや銘柄名が含まれる場合は、その銘柄を分析します。
+## 3. 主な機能
 
-```powershell
-.\.venv\Scripts\python.exe .\scripts\question_agent.py "9202って買い？" --skip-web-update
-```
+- 自然言語の株式関連依頼を Domain / Intent / Entity に整理
+- 銘柄名・銘柄コードの解決
+- 情報不足時の停止ゲート
+- 単一銘柄分析 Workflow
+- 条件検索から候補銘柄を選び、分析へ進める Workflow
+- SQLite VIEW を読み取り専用で参照するレポート生成
+- 相関、回帰、VIF、標準化回帰、簡易予測モデル比較を含む分析
+- HTML レポートと実行ログの生成
+- `unittest` によるオーケストレーション層のテスト
 
-銘柄が指定されていない場合は、質問内容から条件を推定して候補銘柄を選定し、
-最上位候補のレポートを生成します。質問解釈と選定理由は
-`logs/question_flow_<日時>.json` に保存されます。
+投資助言を目的としたものではなく、AI エージェント設計・分析パイプライン実装のデモです。
 
-バックグラウンド化や将来の常駐ワーカー化に向けて、ジョブJSONを作成してから
-別プロセスで実行することもできます。
-
-```powershell
-.\.venv\Scripts\python.exe .\scripts\agent_jobs.py create "初心者向けにおすすめの株を選んで" --skip-web-update
-.\.venv\Scripts\python.exe .\scripts\agent_jobs.py run <job_id>
-.\.venv\Scripts\python.exe .\scripts\agent_jobs.py status <job_id>
-```
-
-ジョブ状態は `logs/job_<job_id>.json` に保存されます。複数ワーカーを用意すれば、
-候補検索、確認待ち、分析実行を並列化しやすくなります。
-
-## AIエージェントのVIEW参照順
-
-AIエージェントは、最初の検索・確認では軽量なエージェント用VIEWを参照します。
-既存の詳細分析用VIEWを最初から全件検索しません。
-
-1. 候補検索: `v_agent_stock_candidates`
-2. データ鮮度確認: `v_agent_data_freshness`
-3. 銘柄名検索: `v_agent_stock_master`
-
-詳細な時系列分析、相関・回帰、レポート生成が必要になった場合のみ、
-`v_ai_stock_report_input` などの詳細分析用VIEWを参照します。
-
-## レポート生成
-
-依存ライブラリを導入:
-
-```powershell
-uv pip install --python .\.venv\Scripts\python.exe -r requirements.txt
-```
-
-既定のANAホールディングス（9202）を分析:
-
-```powershell
-.\.venv\Scripts\python.exe .\scripts\generate_stock_report.py
-```
-
-別の銘柄を指定:
-
-```powershell
-.\.venv\Scripts\python.exe .\scripts\generate_stock_report.py --stock-code 6857
-```
-
-主出力は自己完結型の `reports/stock_report_<銘柄コード>.html` です。
-グラフはHTML内部へ埋め込まれるため、HTMLファイル単体で閲覧できます。
-確認・差分管理用として同名のMarkdownも同時に生成します。
-
-ラッパーは `v_ai_stock_report_input` のみを読み取り、DBを読み取り専用モードで
-開きます。既存PythonのDB書き込み処理は呼び出しません。
-
-生成レポートには次を含みます。
-
-- 相関・回帰・財務情報の自然文による考察
-- 上昇要因、リスク要因、根拠付き総合判断
-- 1年前・3年前との株価比較
-- 財務年度推移と前年度比較
-- 同一セクターの競合比較
-- 株価推移・競合パフォーマンスのグラフ
-
-自然言語で銘柄候補を探索:
-
-```powershell
-.\.venv\Scripts\python.exe .\scripts\search_stocks.py "航空でROEが高くPERが低い銘柄"
-```
-
-対応する代表的な条件は、業界名、ROE、割安・低PER、高配当、上昇・好調、
-安定・安全・初心者向け、円安に強い、原油高に弱い、です。探索結果は候補抽出であり投資推奨ではありません。
-
-## データ更新
-
-通常の銘柄分析は、次の統合コマンドを使用します。
-
-```powershell
-.\.venv\Scripts\python.exe .\scripts\analyze_stock.py 9202
-```
-
-このコマンドは次を順番に実行します。
-
-1. Yahoo Financeから対象銘柄・市場・財務データを取得
-2. 総務省・日本銀行・財務省の公式Webからマクロデータを取得
-3. WebとSQLiteの最新日を比較
-4. Webが新しい対象だけをステージングDBで更新
-5. VIEW経由で分析
-6. Web比較結果とデータ鮮度を含む自己完結HTMLを生成
-
-Web取得に失敗した場合、該当するDBデータは上書きせず、既存値でレポートを
-生成して失敗内容をHTMLへ記載します。
-
-Yahoo Financeから株価・財務・市場指標を取得し、作業用DBの検証後に反映:
-
-```powershell
-.\.venv\Scripts\python.exe .\scripts\update_market_data.py
-```
-
-既存CSVと既存の `import_macro_data.py` でマクロデータを更新:
-
-```powershell
-.\.venv\Scripts\python.exe .\scripts\update_macro_from_existing.py
-```
-
-どちらも更新前DBを `data/backups/` へ保存します。Yahoo Finance取得に失敗した
-銘柄・データ種別は既存値を維持し、更新ログを `logs/` へ出力します。
-
-公式Web更新のみを個別実行:
-
-```powershell
-.\.venv\Scripts\python.exe .\scripts\update_official_macro_web.py
-```
-
-現在の公式取得元は、総務省統計局（CPI）、日本銀行（政策金利系列）、
-財務省（日本10年国債金利）です。GDPは既存の内閣府最新年次CSVを使用します。
-CPI最新月の総合指数は公式概要から取得します。前月比を同一系列で直接確認できない
-場合、誤計算を避けるため `cpi_mom` はNULLとして扱います。
-
-構成とパイプラインの解析結果は
-[`docs/existing_project_analysis.md`](docs/existing_project_analysis.md) を参照してください。
-
-## 現在の開発環境
-
-- 確認日: 2026-07-06
-- OS: Windows
-- Git: 2.55.0.windows.2
-- Python: 3.12.13（Codex同梱版）
-- 仮想環境: `.venv`
-- uv: 0.11.26
-- Python追加ライブラリ: `requirements.txt` に記載し、`.venv` へ導入済み
-
-GitとuvはPATHへ登録済みです。Python仮想環境の作成にはCodex同梱の
-Python 3.12.13を使用しました。
-
-## 仮想環境
-
-PowerShellでの有効化:
-
-```powershell
-.\.venv\Scripts\Activate.ps1
-```
-
-有効化せずにPythonを実行する場合:
-
-```powershell
-.\.venv\Scripts\python.exe --version
-```
-
-## フォルダ構成
+## 4. ディレクトリ構成
 
 ```text
-docs/      ドキュメント
-sql/       SQLファイル
-scripts/   実行・補助スクリプト
-reports/   生成レポート
-logs/      ログ
-data/      データ
+scripts/   CLI、オーケストレーション、分析、更新処理
+tests/     unittest ベースの自動テスト
+docs/      設計メモ、既存プロジェクト分析メモ
+data/      ローカル DB・CSV 入力置き場
+logs/      実行ログ
+reports/   HTML / Markdown レポート
+sql/       SQL 関連ファイル置き場
 ```
 
-既存Pythonは内容を変更せず `scripts/legacy_analysis/` へ複製しています。
-AIエージェントはDBへ直接書き込まず、許可されたVIEWを読み取り専用で参照します。
+GitHub には、個人環境の DB、ログ、レポート、仮想環境は含めません。
 
-## DB変更方針
+## 5. セットアップ方法
 
-SQLやVIEWの検索・参照は直接行ってよいですが、テーブル作成、VIEW作成、ALTER、
-DROPなどのDDLはPythonファイルを通してのみ実行します。DDLを変更する場合は、
-内容を追跡できる専用スクリプトを `scripts/` 配下に作成または更新し、その
-Pythonファイルを実行してDBへ反映します。
+### Windows PowerShell
 
-SQLやDDLを実行するPythonファイルの作成は原則ユーザー側で行います。Codexは、
-必要なVIEW、列、インデックス、DDL方針の提案・レビューを行い、ユーザーから
-明示依頼があった場合のみSQL実行用ファイルを作成します。
+```powershell
+python -m venv .venv
+.\.venv\Scripts\python.exe -m pip install --upgrade pip
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+.\.venv\Scripts\python.exe -m unittest discover -s tests
+```
+
+### macOS / Linux
+
+```bash
+python3 -m venv .venv
+./.venv/bin/python -m pip install --upgrade pip
+./.venv/bin/python -m pip install -r requirements.txt
+./.venv/bin/python -m unittest discover -s tests
+```
+
+## 6. 実行方法
+
+### 自動テスト
+
+clone 直後でも、自動テストは実行できます。
+
+```powershell
+.\.venv\Scripts\python.exe -m unittest discover -s tests
+```
+
+### 単一銘柄分析
+
+実運用 DB を `data/market_analysis.db` に配置済みの場合のみ、以下のように実行できます。
+
+```powershell
+.\.venv\Scripts\python.exe .\scripts\question_agent.py "トヨタを分析して" --skip-web-update
+```
+
+HTML レポートは `reports/stock_report_<銘柄コード>.html` に生成されます。
+
+### 市場データ更新
+
+既存 DB がある場合のみ実行できます。
+
+```powershell
+.\.venv\Scripts\python.exe .\scripts\update_market_data.py --stock-code 7203
+```
+
+### マクロデータ CSV 更新
+
+`scripts/update_macro_from_existing.py` は、既存 CSV を一時作業ディレクトリへコピーしてから既存 importer を実行します。
+
+CSV 入力元の優先順位:
+
+1. `--source-data` CLI 引数
+2. 環境変数 `STOCK_MACRO_SOURCE_DATA`
+3. リポジトリ相対の `data/import`
+
+```powershell
+.\.venv\Scripts\python.exe .\scripts\update_macro_from_existing.py --source-data .\data\import
+```
+
+## 7. 現在の制約
+
+本リポジトリには、実運用で使用している株価・財務・マクロ経済データベースは含まれていません。
+
+そのため、clone 直後に実際の株式分析レポートを生成することはできません。
+
+現時点では以下を確認できます。
+
+- AI オーケストレーション構造
+- Domain・Intent・Entity 処理
+- 情報不足時の停止制御
+- Workflow / Dispatcher 構造
+- State 管理
+- 自動テスト
+
+現在は AI エージェント基盤の設計・実装を公開しています。
+
+データベース初期構築機能、サンプルデータベース、スモークテストについては、今後のバージョンで追加予定です。
+
+実レポート生成に必要な主な VIEW は以下です。
+
+- `v_agent_stock_master`
+- `v_agent_data_freshness`
+- `v_agent_stock_candidates`
+- `v_ai_stock_report_input`
+- `v_stock_fundamental`
+- `v_macro_economic`
+
+## 8. 今後の予定
+
+- 空の SQLite DB から初期スキーマを作成するスクリプトの追加
+- 最小サンプルデータベースの追加
+- clone 直後に実行できるスモークテストの追加
+- README の実行例とサンプル出力の拡充
+- CI によるテスト自動実行
+- レポート生成フローのデモ用サンプル HTML の追加
+
+## 9. ライセンス
+
+現時点ではライセンス未設定です。
+
+公開利用を想定する場合は、`LICENSE` ファイルを追加してください。
+

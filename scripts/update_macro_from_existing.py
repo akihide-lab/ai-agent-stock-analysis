@@ -16,15 +16,8 @@ from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_DB = PROJECT_ROOT / "data" / "market_analysis.db"
-DEFAULT_SOURCE_DATA = (
-    Path.home()
-    / "OneDrive"
-    / "デスクトップ"
-    / "F_ファイル"
-    / "研修"
-    / "研修課題５"
-    / "data"
-)
+SOURCE_DATA_ENV = "STOCK_MACRO_SOURCE_DATA"
+DEFAULT_SOURCE_DATA = PROJECT_ROOT / "data" / "import"
 LEGACY_IMPORTER = PROJECT_ROOT / "scripts" / "legacy_analysis" / "import_macro_data.py"
 REQUIRED_FILES = [
     "zmi2020r.csv",
@@ -36,12 +29,19 @@ REQUIRED_FILES = [
 ]
 
 
+def default_source_data() -> Path:
+    env_value = os.environ.get(SOURCE_DATA_ENV)
+    if env_value:
+        return Path(env_value)
+    return DEFAULT_SOURCE_DATA
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="既存CSVと既存Pythonを使い、マクロテーブルを安全に更新します。"
     )
     parser.add_argument("--db", type=Path, default=DEFAULT_DB)
-    parser.add_argument("--source-data", type=Path, default=DEFAULT_SOURCE_DATA)
+    parser.add_argument("--source-data", type=Path, default=default_source_data())
     return parser.parse_args()
 
 

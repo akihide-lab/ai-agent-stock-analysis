@@ -424,13 +424,14 @@ def build_report(
             )
         failures = acquisition.get("failures", {})
         if failures:
+            failed_sources = "、".join(f"`{key}`" for key in failures)
             lines.extend(
                 [
-                    "### Web取得失敗",
+                    "### Web取得状況",
                     "",
-                    *[f"- `{key}`: {value}" for key, value in failures.items()],
-                    "",
-                    "失敗対象はDBを上書きせず、既存値を使用しました。",
+                    f"- 一部のWeb取得を完了できませんでした（対象: {failed_sources}）。",
+                    "- 詳細なエラー内容は実行ログにのみ保存し、レポート本文には表示していません。",
+                    "- 該当データはDBを上書きせず、既存値を使用しました。",
                     "",
                 ]
             )

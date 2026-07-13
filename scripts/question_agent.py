@@ -617,347 +617,52 @@ def write_decision_log(decision: QuestionDecision, candidates: pd.DataFrame | No
 
 def main() -> None:
     args = parse_args()
-    try:
-        if args.job_id:
-            update_job(args.job_id, status="running", stage="checking_data_freshness")
+    import orchestrator
 
-        domain_result = stock_domain_router.classify(args.question)
-        if not domain_result.is_stock:
-            classification = ClassificationResult(
-                status="unsupported",
-                intent=None,
-                confidence=domain_result.confidence,
-            )
-            if domain_result.domain == "unknown":
-                message = "依頼内容を特定できませんでした。何を確認したいか、もう少し具体的に教えてください。"
-                selected_flow = "followup"
-            else:
-                message = "株式分析フローの対象外です。通常フローへ渡してください。"
-                selected_flow = "general_request"
-            decision = build_followup_decision(args.question, classification, message)
-            decision.detected_domain = domain_result.domain
-            decision.detected_intent = classification.intent
-            decision.intent_status = classification.status
-            decision.missing_fields = list(classification.missing_fields)
-            decision.selected_flow = selected_flow
-            decision.route = selected_flow
-            decision.early_return = True
-            log_path = write_decision_log(decision, None)
-            decision.log_path = str(log_path)
-            log_path.write_text(
-                json.dumps({**asdict(decision), "candidates": []}, ensure_ascii=False, indent=2),
-                encoding="utf-8",
-            )
-            if args.job_id:
-                finish_job(
-                    args.job_id,
-                    status="succeeded",
-                    stage="general_request",
-                    question_flow_log=decision.log_path,
-                )
-            print("質問解釈:")
-            print(f"- detected_domain: {decision.detected_domain}")
-            print(f"- selected_flow: {decision.selected_flow}")
-            print(f"- early_return: {decision.early_return}")
-            print(f"- message: {decision.message}")
-            print(f"質問フローログ: {decision.log_path}")
-            return
+    result = orchestrator.run(args)
+    _print_orchestration_result(result)
 
-        pre_db_result = classify_pre_db(args.question, domain_result)
-        if pre_db_result is not None:
-            if pre_db_result.status == "ambiguous":
-                message = followup_question_builder.build_for_ambiguous_intent(
-                    original_input=args.question,
-                    intent_candidates=pre_db_result.intent_candidates,
-                )
-            elif pre_db_result.status == "insufficient":
-                message = followup_question_builder.build_for_missing_information(
-                    original_input=args.question,
-                    intent=pre_db_result.intent,
-                    missing_fields=pre_db_result.missing_fields,
-                    known_entities=pre_db_result.entities,
-                )
-            elif pre_db_result.status == "unsupported":
-                message = followup_question_builder.build_for_unsupported_request(args.question)
-            elif pre_db_result.status == "system_error":
-                message = followup_question_builder.build_safe_error_response(
-                    pre_db_result.error_code
-                )
-            else:
-                message = followup_question_builder.build_for_reclassification(args.question)
 
-            decision = build_followup_decision(args.question, pre_db_result, message)
-            decision.detected_domain = domain_result.domain
-            decision.detected_intent = pre_db_result.intent
-            decision.intent_status = pre_db_result.status
-            decision.missing_fields = list(pre_db_result.missing_fields)
-            decision.selected_flow = "followup"
-            decision.early_return = True
-            log_path = write_decision_log(decision, None)
-            decision.log_path = str(log_path)
-            log_path.write_text(
-                json.dumps({**asdict(decision), "candidates": []}, ensure_ascii=False, indent=2),
-                encoding="utf-8",
-            )
-            if args.job_id:
-                finish_job(
-                    args.job_id,
-                    status="succeeded",
-                    stage="followup_required",
-                    question_flow_log=decision.log_path,
-                )
-            print("質問解釈:")
-            print(f"- status: {decision.classification_status}")
-            print(f"- route: {decision.route}")
-            print(f"- message: {decision.message}")
-            print(f"質問フローログ: {decision.log_path}")
-            return
-
-        db_path = args.db.expanduser().resolve(strict=True)
-        if args.job_id:
-            update_job(args.job_id, stage="loading_stock_master")
-        master = load_stock_master(db_path)
-        classification, stock_candidates, matched_stocks = classify_with_db(
-            args.question,
-            db_path,
-            master,
-        )
-
-        if classification.status in {
-            "ambiguous",
-            "insufficient",
-            "unsupported",
-            "system_error",
-        }:
-            if classification.status == "ambiguous" and stock_candidates:
-                message = followup_question_builder.build_for_multiple_stock_candidates(
-                    stock_candidates,
-                    original_input=args.question,
-                )
-            elif classification.status == "ambiguous":
-                message = followup_question_builder.build_for_ambiguous_intent(
-                    original_input=args.question,
-                    intent_candidates=classification.intent_candidates,
-                )
-            elif classification.status == "insufficient" and classification.missing_fields == ["銘柄"]:
-                message = followup_question_builder.build_for_unknown_stock(args.question)
-            elif classification.status == "insufficient":
-                message = followup_question_builder.build_for_missing_information(
-                    original_input=args.question,
-                    intent=classification.intent,
-                    missing_fields=classification.missing_fields,
-                    known_entities=classification.entities,
-                )
-            elif classification.status == "unsupported":
-                message = followup_question_builder.build_for_unsupported_request(args.question)
-            else:
-                message = followup_question_builder.build_safe_error_response(
-                    classification.error_code
-                )
-
-            data_freshness: list[dict[str, object]] = []
-            decision = build_followup_decision(
-                args.question,
-                classification,
-                message,
-                data_freshness=data_freshness,
-            )
-            decision.detected_domain = domain_result.domain
-            decision.detected_intent = classification.intent
-            decision.intent_status = classification.status
-            decision.missing_fields = list(classification.missing_fields)
-            decision.resolved_stock_candidates = [asdict(candidate) for candidate in stock_candidates]
-            decision.selected_flow = "followup"
-            decision.early_return = True
-            log_path = write_decision_log(
-                decision,
-                pd.DataFrame([asdict(candidate) for candidate in stock_candidates])
-                if stock_candidates
-                else None,
-            )
-            decision.log_path = str(log_path)
-            log_path.write_text(
-                json.dumps(
-                    {
-                        **asdict(decision),
-                        "candidates": [asdict(candidate) for candidate in stock_candidates],
-                    },
-                    ensure_ascii=False,
-                    indent=2,
-                    default=str,
-                ),
-                encoding="utf-8",
-            )
-            if args.job_id:
-                finish_job(
-                    args.job_id,
-                    status="succeeded",
-                    stage="followup_required",
-                    question_flow_log=decision.log_path,
-                )
-            print("質問解釈:")
-            print(f"- status: {decision.classification_status}")
-            if decision.primary_intent:
-                print(f"- primary_intent: {decision.primary_intent}")
-            print(f"- route: {decision.route}")
-            print(f"- message: {decision.message}")
-            print(f"質問フローログ: {decision.log_path}")
-            return
-
-        data_freshness = load_data_freshness(db_path)
-
-        if args.job_id:
-            update_job(args.job_id, stage="interpreting_question")
-        primary_intent = classification.intent or "Intent001 おすすめ銘柄検索"
-        secondary_intents = list(classification.intent_candidates)
-        entities = dict(classification.entities)
-        missing = {
-            "required": required_missing(primary_intent, entities),
-            "optional": [],
-            "defaulted": [],
-        }
-        if "投資期間" not in entities:
-            missing["defaulted"].append("投資期間: 中長期")
-        if "リスク" not in entities:
-            missing["defaulted"].append("リスク: 普通")
-
-        decision = QuestionDecision(
-            user_question=args.question,
-            primary_intent=primary_intent,
-            secondary_intents=secondary_intents,
-            entities=entities,
-            missing_information=missing,
-            classification_status=classification.status,
-            confidence=classification.confidence,
-            data_freshness=data_freshness,
-        )
-        decision.detected_domain = domain_result.domain
-        decision.detected_intent = primary_intent
-        decision.intent_status = classification.status
-        decision.missing_fields = list(missing["required"])
-
-        candidates: pd.DataFrame | None = None
-        if missing["required"]:
-            decision.route = "followup_required"
-            decision.message = "分析に必要な情報が不足しています。"
-            decision.selected_flow = "followup"
-            decision.early_return = True
-        elif primary_intent in {
-            "Intent001 おすすめ銘柄検索",
-            "Intent002 値上がり期待銘柄検索",
-            "Intent003 高配当銘柄検索",
-            "Intent004 株主優待銘柄検索",
-            "Intent005 安定銘柄検索",
-            "Intent006 成長株検索",
-            "Intent007 業界分析",
-        }:
-            if args.job_id:
-                update_job(args.job_id, stage="selecting_candidates")
-            candidates, reasons = select_candidate(
-                args.question, db_path, primary_intent, entities, args.limit
-            )
-            if candidates.empty:
-                decision.route = "no_candidate"
-                decision.message = "条件に合う候補銘柄が見つかりませんでした。"
-                decision.selected_flow = "no_candidate"
-                decision.early_return = True
-            else:
-                selected = candidates.iloc[0]
-                decision.route = "select_and_analyze"
-                decision.selected_stock_code = str(selected["stock_code"])
-                decision.selected_stock_name = str(selected["stock_name"])
-                decision.selection_reasons = reasons
-                decision.selected_flow = "select_and_analyze"
-        else:
-            stocks = entities.get("銘柄") or []
-            selected_stock = stocks[0]
-            decision.route = "analyze_stock"
-            decision.selected_stock_code = str(selected_stock["stock_code"])
-            decision.selected_stock_name = str(selected_stock["stock_name"])
-            decision.selection_reasons = ["質問文で銘柄が指定されているため、その銘柄を分析"]
-            decision.resolved_stock_candidates = list(stocks)
-            decision.selected_flow = "analyze_stock"
-
-        if args.job_id:
-            update_job(
-                args.job_id,
-                stage="decision_ready",
-                primary_intent=decision.primary_intent,
-                route=decision.route,
-                selected_stock_code=decision.selected_stock_code,
-                selected_stock_name=decision.selected_stock_name,
-            )
-
-        if decision.selected_stock_code and not args.dry_run:
-            if args.job_id:
-                update_job(args.job_id, stage="generating_report")
-            report_path = run_report(
-                decision.selected_stock_code,
-                db_path,
-                args.skip_web_update,
-                args.skip_finance,
-            )
-            decision.report_path = str(report_path)
-
-        log_path = write_decision_log(decision, candidates)
-        decision.log_path = str(log_path)
-        log_path.write_text(
-            json.dumps(
-                {
-                    **asdict(decision),
-                    "candidates": candidates.to_dict(orient="records") if candidates is not None else [],
-                },
-                ensure_ascii=False,
-                indent=2,
-                default=str,
-            ),
-            encoding="utf-8",
-        )
-
-        if args.job_id:
-            finish_job(
-                args.job_id,
-                status="succeeded",
-                stage="completed",
-                selected_stock_code=decision.selected_stock_code,
-                selected_stock_name=decision.selected_stock_name,
-                report_path=decision.report_path,
-                question_flow_log=decision.log_path,
-            )
-
-        print("質問解釈:")
-        print(f"- primary_intent: {decision.primary_intent}")
-        if decision.secondary_intents:
-            print(f"- secondary_intents: {', '.join(decision.secondary_intents)}")
-        print(f"- route: {decision.route}")
-        if decision.selected_stock_code:
-            print(
-                f"- selected_stock: {decision.selected_stock_code} "
-                f"{decision.selected_stock_name}"
-            )
-        if decision.selection_reasons:
-            print(f"- selection_reasons: {' / '.join(decision.selection_reasons)}")
-        if missing["required"]:
-            print(f"- required_missing: {', '.join(missing['required'])}")
-        if decision.report_path:
-            print(f"HTMLレポート: {decision.report_path}")
+def _print_orchestration_result(result: object) -> None:
+    decision = result.decision
+    print("質問解釈:")
+    if decision.route in {"followup", "general_request"}:
+        print(f"- detected_domain: {decision.detected_domain}")
+        print(f"- selected_flow: {decision.selected_flow}")
+        print(f"- early_return: {decision.early_return}")
+        print(f"- message: {decision.message}")
         print(f"質問フローログ: {decision.log_path}")
-    except Exception as exc:
-        error_code = f"ERR-{uuid.uuid4().hex[:10]}"
-        error_log = write_system_error_log(args.question, exc, request_id=error_code)
-        if args.job_id:
-            finish_job(
-                args.job_id,
-                status="failed",
-                stage="failed",
-                error=f"system_error: {error_code}",
-            )
-        logger.debug("Unexpected error while handling user request", exc_info=True)
-        print("質問解釈:")
-        print("- status: system_error")
-        print("- route: system_error")
-        print(f"- message: {followup_question_builder.build_safe_error_response(error_code)}")
-        print(f"エラーログ: {error_log}")
+        return
+
+    if decision.route in {"followup_required", "system_error"} or decision.early_return:
+        print(f"- status: {decision.classification_status}")
+        if decision.primary_intent:
+            print(f"- primary_intent: {decision.primary_intent}")
+        print(f"- route: {decision.route}")
+        print(f"- message: {decision.message}")
+        if decision.route == "system_error" and getattr(result, "error_log", None):
+            print(f"エラーログ: {result.error_log}")
+        else:
+            print(f"質問フローログ: {decision.log_path}")
+        return
+
+    print(f"- primary_intent: {decision.primary_intent}")
+    if decision.secondary_intents:
+        print(f"- secondary_intents: {', '.join(decision.secondary_intents)}")
+    print(f"- route: {decision.route}")
+    if decision.selected_stock_code:
+        print(
+            f"- selected_stock: {decision.selected_stock_code} "
+            f"{decision.selected_stock_name}"
+        )
+    if decision.selection_reasons:
+        print(f"- selection_reasons: {' / '.join(decision.selection_reasons)}")
+    required_missing = decision.missing_information.get("required", [])
+    if required_missing:
+        print(f"- required_missing: {', '.join(required_missing)}")
+    if decision.report_path:
+        print(f"HTMLレポート: {decision.report_path}")
+    print(f"質問フローログ: {decision.log_path}")
 
 
 if __name__ == "__main__":
