@@ -100,6 +100,15 @@ SELECT_COLUMNS = [
 ]
 
 
+def display_database_label(db_path: Path) -> str:
+    """Return a public-safe database label for generated reports."""
+    try:
+        relative = db_path.expanduser().resolve().relative_to(PROJECT_ROOT)
+    except (OSError, RuntimeError, ValueError):
+        return "SQLite Database"
+    return relative.as_posix()
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="承認済みSQLite VIEWから銘柄分析Markdownを生成します。"
@@ -373,7 +382,7 @@ def build_report(
         f"# 銘柄分析レポート: {stock_name}（{stock_code}）",
         "",
         f"- 生成日時: {generated_at}",
-        f"- 参照DB: `{db_path.resolve()}`",
+        f"- 参照DB: `{display_database_label(db_path)}`",
         f"- 参照VIEW: `{REPORT_VIEW}`",
         "- DB接続: 読み取り専用（`mode=ro`、`PRAGMA query_only=ON`）",
         "- 既存分析ロジック: 相関・回帰・VIF・標準化回帰・予測モデル比較を再利用",

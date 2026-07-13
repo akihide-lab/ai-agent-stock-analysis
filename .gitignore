@@ -1,5 +1,6 @@
 .venv/
 __pycache__/
+**/__pycache__/
 *.py[cod]
 .pytest_cache/
 .mypy_cache/
@@ -7,6 +8,16 @@ __pycache__/
 .env
 .env.*
 !.env.example
+*.log
+*.tmp
+*.temp
+*.bak
+*.swp
+*~
+.DS_Store
+Thumbs.db
+tmp/
+temp/
 
 # Local secrets / credentials
 *.pem
@@ -28,6 +39,8 @@ logs/*
 !logs/.gitkeep
 reports/*
 !reports/.gitkeep
+!reports/stock_report_7203.html
+!reports/toyota_7203_analysis_20260713.mp4
 chroma_db/
 
 # Local databases and backups
