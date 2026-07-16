@@ -3,9 +3,16 @@
 from __future__ import annotations
 
 import re
-import sqlite3
+import os
 from pathlib import Path
 from typing import Any
+
+from db_connection import (
+    connect_database,
+    get_db_type,
+    get_placeholder,
+    get_view_exists_sql,
+)
 
 try:
     from .query_flow_models import DataSourcePlan, QueryFlowInput, RdbResult
@@ -17,30 +24,55 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_DB_PATH = PROJECT_ROOT / "data" / "market_analysis.db"
 
 
-def connect_read_only(db_path: Path = DEFAULT_DB_PATH) -> sqlite3.Connection:
-    resolved = db_path.expanduser().resolve(strict=True)
-    connection = sqlite3.connect(resolved.as_uri() + "?mode=ro", uri=True)
-    connection.row_factory = sqlite3.Row
-    connection.execute("PRAGMA query_only=ON")
-    return connection
+def _sqlite_env_for_path(db_path: Path) -> dict[str, str]:
+    env = dict(os.environ)
+    env["DB_TYPE"] = "sqlite"
+    env["SQLITE_DB_PATH"] = str(db_path)
+    return env
 
 
-def table_or_view_exists(connection: sqlite3.Connection, name: str) -> bool:
-    row = connection.execute(
-        """
-        SELECT 1
-        FROM sqlite_master
-        WHERE name = ?
-          AND type IN ('table', 'view')
-        LIMIT 1
-        """,
-        (name,),
-    ).fetchone()
-    return row is not None
+def connect_read_only(db_path: Path = DEFAULT_DB_PATH) -> Any:
+    db_type = get_db_type()
+    env = _sqlite_env_for_path(db_path) if db_type == "sqlite" else None
+    return connect_database(read_only=True, env=env)
 
 
-def _rows(connection: sqlite3.Connection, sql: str, params: tuple[Any, ...] = ()) -> list[dict[str, Any]]:
-    return [dict(row) for row in connection.execute(sql, params).fetchall()]
+def _close_connection(connection: Any) -> None:
+    close = getattr(connection, "close", None)
+    if callable(close):
+        close()
+
+
+def _fetchall(connection: Any, sql: str, params: tuple[Any, ...] = ()) -> tuple[list[str], list[Any]]:
+    if get_db_type() == "sqlite":
+        cursor = connection.execute(sql, params)
+        columns = [description[0] for description in cursor.description]
+        return columns, cursor.fetchall()
+
+    with connection.cursor() as cursor:
+        cursor.execute(sql, params)
+        columns = [description[0] for description in cursor.description]
+        return columns, cursor.fetchall()
+
+
+def _fetchone(connection: Any, sql: str, params: tuple[Any, ...] = ()) -> Any:
+    if get_db_type() == "sqlite":
+        return connection.execute(sql, params).fetchone()
+    with connection.cursor() as cursor:
+        cursor.execute(sql, params)
+        return cursor.fetchone()
+
+
+def table_or_view_exists(connection: Any, name: str) -> bool:
+    db_type = get_db_type()
+    sql = get_view_exists_sql(db_type)
+    params = (name,) if db_type == "sqlite" else (None, name)
+    return _fetchone(connection, sql, params) is not None
+
+
+def _rows(connection: Any, sql: str, params: tuple[Any, ...] = ()) -> list[dict[str, Any]]:
+    columns, rows = _fetchall(connection, sql, params)
+    return [dict(zip(columns, row)) for row in rows]
 
 
 def _code_candidates(text: str) -> list[str]:
@@ -65,7 +97,7 @@ def _name_terms(text: str) -> list[str]:
     return [term.strip().lower() for term in terms if len(term.strip()) >= 2]
 
 
-def load_stock_master(connection: sqlite3.Connection) -> list[dict[str, Any]]:
+def load_stock_master(connection: Any) -> list[dict[str, Any]]:
     if not table_or_view_exists(connection, "v_agent_stock_master"):
         return []
     return _rows(
@@ -81,7 +113,7 @@ def load_stock_master(connection: sqlite3.Connection) -> list[dict[str, Any]]:
 def resolve_stocks(
     question: str,
     entities: dict[str, Any] | None,
-    connection: sqlite3.Connection,
+    connection: Any,
 ) -> list[dict[str, Any]]:
     """Resolve stock codes from explicit entities, 4-digit codes, or names."""
 
@@ -128,7 +160,7 @@ def resolve_stocks(
     return matches
 
 
-def fetch_data_freshness(connection: sqlite3.Connection) -> RdbResult:
+def fetch_data_freshness(connection: Any) -> RdbResult:
     if not table_or_view_exists(connection, "v_agent_data_freshness"):
         return RdbResult(target="data_freshness", metadata={"available": False})
     rows = _rows(
@@ -143,15 +175,16 @@ def fetch_data_freshness(connection: sqlite3.Connection) -> RdbResult:
     return RdbResult(target="data_freshness", rows=rows, metadata={"available": True})
 
 
-def fetch_stock_profile(connection: sqlite3.Connection, stock_code: str) -> RdbResult:
+def fetch_stock_profile(connection: Any, stock_code: str) -> RdbResult:
     rows = []
     if table_or_view_exists(connection, "v_agent_stock_master"):
+        placeholder = get_placeholder()
         rows = _rows(
             connection,
-            """
+            f"""
             SELECT stock_code, stock_name, sector
             FROM v_agent_stock_master
-            WHERE stock_code = ?
+            WHERE stock_code = {placeholder}
             LIMIT 1
             """,
             (stock_code,),
@@ -159,18 +192,19 @@ def fetch_stock_profile(connection: sqlite3.Connection, stock_code: str) -> RdbR
     return RdbResult(target="stock_profile", rows=rows, metadata={"stock_code": stock_code})
 
 
-def fetch_latest_candidate_row(connection: sqlite3.Connection, stock_code: str) -> RdbResult:
+def fetch_latest_candidate_row(connection: Any, stock_code: str) -> RdbResult:
     if not table_or_view_exists(connection, "v_agent_stock_candidates"):
         return RdbResult(
             target="latest_candidate_row",
             metadata={"stock_code": stock_code, "available": False},
         )
+    placeholder = get_placeholder()
     rows = _rows(
         connection,
-        """
+        f"""
         SELECT *
         FROM v_agent_stock_candidates
-        WHERE stock_code = ?
+        WHERE stock_code = {placeholder}
         ORDER BY latest_trade_date DESC
         LIMIT 1
         """,
@@ -183,15 +217,16 @@ def fetch_latest_candidate_row(connection: sqlite3.Connection, stock_code: str) 
     )
 
 
-def fetch_report_input_summary(connection: sqlite3.Connection, stock_code: str) -> RdbResult:
+def fetch_report_input_summary(connection: Any, stock_code: str) -> RdbResult:
     if not table_or_view_exists(connection, "v_ai_stock_report_input"):
         return RdbResult(
             target="report_input_summary",
             metadata={"stock_code": stock_code, "available": False},
         )
+    placeholder = get_placeholder()
     rows = _rows(
         connection,
-        """
+        f"""
         SELECT
             stock_code,
             stock_name,
@@ -199,7 +234,7 @@ def fetch_report_input_summary(connection: sqlite3.Connection, stock_code: str) 
             MAX(trade_date) AS latest_trade_date,
             COUNT(*) AS row_count
         FROM v_ai_stock_report_input
-        WHERE stock_code = ?
+        WHERE stock_code = {placeholder}
         GROUP BY stock_code, stock_name
         """,
         (stock_code,),
@@ -211,15 +246,16 @@ def fetch_report_input_summary(connection: sqlite3.Connection, stock_code: str) 
     )
 
 
-def fetch_analysis_readiness(connection: sqlite3.Connection, stock_code: str) -> RdbResult:
+def fetch_analysis_readiness(connection: Any, stock_code: str) -> RdbResult:
     if not table_or_view_exists(connection, "v_ai_stock_report_input"):
         return RdbResult(
             target="analysis_readiness",
             metadata={"stock_code": stock_code, "available": False},
         )
+    placeholder = get_placeholder()
     rows = _rows(
         connection,
-        """
+        f"""
         SELECT
             stock_code,
             stock_name,
@@ -241,7 +277,7 @@ def fetch_analysis_readiness(connection: sqlite3.Connection, stock_code: str) ->
             MAX(trade_date) AS latest_trade_date,
             MAX(fiscal_year) AS latest_fiscal_year
         FROM v_ai_stock_report_input
-        WHERE stock_code = ?
+        WHERE stock_code = {placeholder}
         GROUP BY stock_code, stock_name
         """,
         (stock_code,),
@@ -258,10 +294,12 @@ def fetch_analysis_readiness(connection: sqlite3.Connection, stock_code: str) ->
 
 
 def fetch_candidate_stocks(
-    connection: sqlite3.Connection,
+    connection: Any,
     intent_id: str,
     limit: int = 10,
 ) -> RdbResult:
+    if not isinstance(limit, int) or limit < 1:
+        raise ValueError("limit must be a positive integer")
     if not table_or_view_exists(connection, "v_agent_stock_candidates"):
         return RdbResult(target="candidate_stocks", metadata={"available": False})
 
@@ -271,13 +309,14 @@ def fetch_candidate_stocks(
     elif intent_id == "Intent002":
         order_by = "volume DESC"
 
+    placeholder = get_placeholder()
     rows = _rows(
         connection,
         f"""
         SELECT *
         FROM v_agent_stock_candidates
         ORDER BY {order_by}
-        LIMIT ?
+        LIMIT {placeholder}
         """,
         (limit,),
     )
@@ -300,7 +339,8 @@ def retrieve_rdb_context(
     results: list[RdbResult] = []
     resolved_stocks: list[dict[str, Any]] = []
 
-    with connect_read_only(db_path) as connection:
+    connection = connect_read_only(db_path)
+    try:
         resolved_stocks = resolve_stocks(query.user_question, query.entities, connection)
         results.append(fetch_data_freshness(connection))
 
@@ -322,5 +362,7 @@ def retrieve_rdb_context(
                 results.append(fetch_latest_candidate_row(connection, stock_code))
                 results.append(fetch_report_input_summary(connection, stock_code))
                 results.append(fetch_analysis_readiness(connection, stock_code))
+    finally:
+        _close_connection(connection)
 
     return results, resolved_stocks, warnings

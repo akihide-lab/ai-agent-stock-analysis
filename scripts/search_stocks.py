@@ -3,14 +3,28 @@
 from __future__ import annotations
 
 import argparse
-import sqlite3
+import os
 from pathlib import Path
+from typing import Any
 
 import pandas as pd
+
+from db_connection import (
+    DatabaseConfigurationError,
+    DatabaseConnectionError,
+    connect_database,
+    get_db_type,
+    get_placeholder,
+)
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_DB = PROJECT_ROOT / "data" / "market_analysis.db"
+VIEW_NAME = "v_agent_stock_candidates"
+
+
+class StockSearchDatabaseError(RuntimeError):
+    """Raised when stock candidate retrieval fails safely."""
 
 
 def parse_args() -> argparse.Namespace:
@@ -21,15 +35,61 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def connect_read_only(path: Path) -> sqlite3.Connection:
-    connection = sqlite3.connect(
-        path.resolve(strict=True).as_uri() + "?mode=ro", uri=True
-    )
-    connection.execute("PRAGMA query_only=ON")
-    return connection
+def _sqlite_env_for_path(path: Path | None) -> dict[str, str]:
+    env = dict(os.environ)
+    env["DB_TYPE"] = "sqlite"
+    if path is not None:
+        env["SQLITE_DB_PATH"] = str(path)
+    return env
+
+
+def connect_read_only(path: Path | None = None) -> Any:
+    db_type = get_db_type()
+    env = _sqlite_env_for_path(path) if db_type == "sqlite" else None
+    return connect_database(read_only=True, env=env)
+
+
+def _close_connection(connection: Any) -> None:
+    close = getattr(connection, "close", None)
+    if callable(close):
+        close()
+
+
+def _view_exists(connection: Any, db_type: str) -> bool:
+    placeholder = get_placeholder(db_type)
+    if db_type == "sqlite":
+        sql = f"""
+            SELECT 1
+            FROM sqlite_master
+            WHERE type = 'view'
+              AND name = {placeholder}
+            LIMIT 1
+        """
+    else:
+        sql = f"""
+            SELECT 1
+            FROM information_schema.views
+            WHERE table_schema = COALESCE({placeholder}, current_schema())
+              AND table_name = {placeholder}
+            LIMIT 1
+        """
+    params: tuple[object, ...]
+    if db_type == "sqlite":
+        params = (VIEW_NAME,)
+    else:
+        params = (None, VIEW_NAME)
+
+    if db_type == "sqlite":
+        row = connection.execute(sql, params).fetchone()
+    else:
+        with connection.cursor() as cursor:
+            cursor.execute(sql, params)
+            row = cursor.fetchone()
+    return row is not None
 
 
 def load_candidates(db_path: Path) -> pd.DataFrame:
+    db_type = get_db_type()
     query = """
         SELECT
             stock_code,
@@ -48,8 +108,25 @@ def load_candidates(db_path: Path) -> pd.DataFrame:
         FROM v_agent_stock_candidates
         ORDER BY stock_code
     """
-    with connect_read_only(db_path) as connection:
+    connection = None
+    try:
+        connection = connect_read_only(db_path)
+        if not _view_exists(connection, db_type):
+            raise StockSearchDatabaseError(
+                f"Required view is not available: {VIEW_NAME}"
+            )
         frame = pd.read_sql_query(query, connection)
+    except StockSearchDatabaseError:
+        raise
+    except (DatabaseConfigurationError, DatabaseConnectionError):
+        raise
+    except Exception as exc:
+        raise StockSearchDatabaseError(
+            "Failed to load stock candidates from the configured database."
+        ) from exc
+    finally:
+        if connection is not None:
+            _close_connection(connection)
     frame["trade_date"] = pd.to_datetime(frame["trade_date"])
     return frame
 

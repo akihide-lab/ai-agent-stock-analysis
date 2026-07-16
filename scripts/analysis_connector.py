@@ -20,6 +20,7 @@ try:
         QueryFlowInput,
         to_plain_data,
     )
+    from .db_connection import get_db_type
     from .rag_retriever import DEFAULT_CHROMA_DIR, search_rag_context
     from .rdb_retriever import DEFAULT_DB_PATH, retrieve_rdb_context
     from .stock_name_resolver import StockCandidate, StockNameResolver
@@ -34,6 +35,7 @@ except ImportError:
         QueryFlowInput,
         to_plain_data,
     )
+    from db_connection import get_db_type
     from rag_retriever import DEFAULT_CHROMA_DIR, search_rag_context
     from rdb_retriever import DEFAULT_DB_PATH, retrieve_rdb_context
     from stock_name_resolver import StockCandidate, StockNameResolver
@@ -149,17 +151,28 @@ def _build_followup_result(
     return result
 
 
-def _run_existing_update_scripts(stock_code: str, db_path: Path) -> tuple[bool, list[str]]:
+def _run_existing_update_scripts(
+    stock_code: str,
+    db_path: Path,
+    skip_finance: bool = False,
+) -> tuple[bool, list[str]]:
+    if get_db_type() != "sqlite":
+        return False, ["Data update scripts are skipped for the configured database type."]
+
     messages: list[str] = []
+    market_command = [
+        sys.executable,
+        str(UPDATE_MARKET_SCRIPT),
+        "--db",
+        str(db_path),
+        "--stock-code",
+        stock_code,
+    ]
+    if skip_finance:
+        market_command.append("--skip-finance")
+
     commands = [
-        [
-            sys.executable,
-            str(UPDATE_MARKET_SCRIPT),
-            "--db",
-            str(db_path),
-            "--stock-code",
-            stock_code,
-        ],
+        market_command,
         [
             sys.executable,
             str(UPDATE_OFFICIAL_MACRO_SCRIPT),
@@ -190,6 +203,12 @@ def _run_existing_update_scripts(stock_code: str, db_path: Path) -> tuple[bool, 
     return True, messages
 
 
+def _db_path_for_existing_report(db_path: Path) -> Path:
+    if get_db_type() == "sqlite":
+        return db_path.expanduser().resolve(strict=True)
+    return db_path.expanduser()
+
+
 def run_v1_analysis_flow(
     question: str,
     intent_id: str | None = None,
@@ -199,6 +218,8 @@ def run_v1_analysis_flow(
     generate_report: bool = True,
     allow_update: bool = True,
     limit: int = 10,
+    output_path: Path | None = None,
+    skip_finance: bool = False,
 ) -> AnalysisRunResult:
     query = build_initial_query(question, intent_id)
 
@@ -274,9 +295,24 @@ def run_v1_analysis_flow(
         and context.selected_stock_code
         and (complete_rows is None or complete_rows < 20)
     ):
+        if get_db_type() != "sqlite":
+            warnings.append(
+                "Existing SQLite update scripts were skipped for the configured database type."
+            )
+            result = AnalysisRunResult(
+                analysis_context=context,
+                report_path=None,
+                route=plan.next_flow,
+                succeeded=False,
+                warnings=warnings,
+            )
+            _write_result(output_json, result)
+            return result
+
         ok, update_messages = _run_existing_update_scripts(
             context.selected_stock_code,
             db_path.expanduser().resolve(strict=True),
+            skip_finance=skip_finance,
         )
         warnings.extend(update_messages)
         if not ok:
@@ -325,8 +361,8 @@ def run_v1_analysis_flow(
             try:
                 report = existing_generate_report(
                     context.selected_stock_code,
-                    db_path.expanduser().resolve(strict=True),
-                    None,
+                    _db_path_for_existing_report(db_path),
+                    output_path,
                     None,
                 )
                 report_path = str(report)

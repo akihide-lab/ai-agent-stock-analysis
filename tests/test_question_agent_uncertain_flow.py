@@ -182,6 +182,21 @@ class UncertainQuestionFlowTest(unittest.TestCase):
         self.assertEqual(candidates, [])
         self.assertIn("銘柄", result.missing_fields)
 
+    def test_unknown_stock_code_is_insufficient_not_guessed(self) -> None:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp_dir:
+            db_path = Path(temp_dir) / "stocks.db"
+            make_stock_db(db_path)
+
+            result, candidates, _ = question_agent.classify_with_db(
+                "9999",
+                db_path,
+                make_master_frame(),
+            )
+
+        self.assertEqual(result.status, "insufficient")
+        self.assertEqual(candidates, [])
+        self.assertIn("銘柄", result.missing_fields)
+
     def test_stock_resolver_exception_becomes_system_error(self) -> None:
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp_dir:
             original_log_directory = question_agent.LOG_DIRECTORY

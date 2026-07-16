@@ -44,15 +44,29 @@ SYSTEM_ERROR = "system_error"
 WORKFLOWS: dict[str, WorkflowDefinition] = {
     SINGLE_STOCK_ANALYSIS: WorkflowDefinition(
         name=SINGLE_STOCK_ANALYSIS,
-        required_inputs=("selected_stock_code", "db_path", "skip_web_update"),
-        steps=("generate_or_run_existing_report",),
+        required_inputs=(
+            "selected_stock_code",
+            "db_path",
+            "skip_web_update",
+            "skip_finance",
+            "limit",
+        ),
+        steps=("validate_selected_stock", "delegate_to_analysis_connector"),
         update_allowed=True,
         stop_conditions=("missing_selected_stock_code",),
     ),
     STOCK_SCREENING: WorkflowDefinition(
         name=STOCK_SCREENING,
-        required_inputs=("primary_intent", "entities", "db_path", "limit"),
-        steps=("select_candidate", "generate_or_run_existing_report"),
+        required_inputs=(
+            "user_question",
+            "primary_intent",
+            "entities",
+            "db_path",
+            "limit",
+            "skip_web_update",
+            "skip_finance",
+        ),
+        steps=("select_candidate", "delegate_selected_stock_to_analysis_connector"),
         update_allowed=True,
         stop_conditions=("missing_required_information", "no_candidate"),
     ),

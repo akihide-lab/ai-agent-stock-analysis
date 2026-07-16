@@ -1,5 +1,7 @@
 beautifulsoup4
 requests
+psycopg[binary]
+python-dotenv
 matplotlib
 markdown-it-py
 chromadb

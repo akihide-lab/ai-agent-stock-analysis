@@ -15,6 +15,8 @@ import followup_question_builder
 import question_agent as qa
 import stock_domain_router
 from agent_jobs import finish_job, update_job
+from analysis_connector import run_v1_analysis_flow
+from db_connection import get_db_type
 from query_flow_models import ClassificationResult
 from workflows import (
     AgentState,
@@ -60,7 +62,7 @@ def run(args: Any) -> OrchestrationResult:
             _finalize_terminal(args.job_id, decision, state)
             return OrchestrationResult(state, workflow_name, decision)
 
-        db_path = args.db.expanduser().resolve(strict=True)
+        db_path = _db_path_for_orchestration(args.db)
         if args.job_id:
             update_job(args.job_id, stage="loading_stock_master")
         master = qa.load_stock_master(db_path)
@@ -126,7 +128,7 @@ def run(args: Any) -> OrchestrationResult:
             if not args.dry_run and workflow_name in {SINGLE_STOCK_ANALYSIS, STOCK_SCREENING}:
                 update_job(args.job_id, stage="generating_report")
 
-        dispatched = dispatcher.execute(
+        dispatched = _execute_ready_workflow(
             workflow,
             decision=decision,
             db_path=db_path,
@@ -213,6 +215,56 @@ def _build_domain_stop(
     decision.early_return = True
     _write_log(decision, None)
     return decision, workflow_name, state
+
+
+def _db_path_for_orchestration(db_path: Path) -> Path:
+    if get_db_type() == "sqlite":
+        return db_path.expanduser().resolve(strict=True)
+    return db_path.expanduser()
+
+
+def _execute_ready_workflow(
+    workflow: Any,
+    *,
+    decision: qa.QuestionDecision,
+    db_path: Path,
+    skip_web_update: bool,
+    skip_finance: bool,
+    dry_run: bool,
+    limit: int,
+) -> dispatcher.DispatchResult:
+    if (
+        get_db_type() == "postgres"
+        and workflow.name == SINGLE_STOCK_ANALYSIS
+        and not dry_run
+    ):
+        result = run_v1_analysis_flow(
+            question=str(decision.selected_stock_code),
+            intent_id="Intent008",
+            db_path=db_path,
+            generate_report=True,
+            allow_update=not skip_web_update,
+            limit=limit,
+            skip_finance=skip_finance,
+        )
+        return dispatcher.DispatchResult(
+            workflow_name=workflow.name,
+            succeeded=bool(result.succeeded),
+            report_path=result.report_path,
+            message=result.followup_question or "",
+            error=None if result.succeeded else result.route,
+            metadata={"route": result.route},
+        )
+
+    return dispatcher.execute(
+        workflow,
+        decision=decision,
+        db_path=db_path,
+        skip_web_update=skip_web_update,
+        skip_finance=skip_finance,
+        dry_run=dry_run,
+        limit=limit,
+    )
 
 
 def _build_pre_db_stop(

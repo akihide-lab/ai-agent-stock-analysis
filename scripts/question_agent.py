@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import re
 import subprocess
 import sys
@@ -13,12 +14,18 @@ import uuid
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 import pandas as pd
 
 from agent_jobs import finish_job, update_job
+from db_connection import (
+    DatabaseConfigurationError,
+    DatabaseConnectionError,
+    connect_database,
+    get_db_type,
+)
 from search_stocks import (
-    connect_read_only,
     load_candidates,
     natural_language_search,
     summarize_stocks,
@@ -289,33 +296,101 @@ def write_system_error_log(
     return path
 
 
+def _sqlite_env_for_path(db_path: Path) -> dict[str, str]:
+    env = dict(os.environ)
+    env["DB_TYPE"] = "sqlite"
+    env["SQLITE_DB_PATH"] = str(db_path)
+    return env
+
+
+def _connect_read_only(db_path: Path) -> Any:
+    db_type = get_db_type()
+    env = _sqlite_env_for_path(db_path) if db_type == "sqlite" else None
+    return connect_database(read_only=True, env=env)
+
+
+def _close_connection(connection: Any) -> None:
+    close = getattr(connection, "close", None)
+    if callable(close):
+        close()
+
+
+def _fetch_dicts(
+    connection: Any,
+    sql: str,
+    params: tuple[object, ...] = (),
+) -> list[dict[str, object]]:
+    if get_db_type() == "sqlite":
+        cursor = connection.execute(sql, params)
+        columns = [description[0] for description in cursor.description]
+        return [dict(zip(columns, row)) for row in cursor.fetchall()]
+
+    with connection.cursor() as cursor:
+        cursor.execute(sql, params)
+        columns = [description[0] for description in cursor.description]
+        return [dict(zip(columns, row)) for row in cursor.fetchall()]
+
+
 def load_stock_master(db_path: Path) -> pd.DataFrame:
     query = """
         SELECT
             stock_code,
             stock_name,
+            market,
             sector
         FROM v_agent_stock_master
         ORDER BY stock_code
     """
-    with connect_read_only(db_path) as connection:
-        frame = pd.read_sql_query(query, connection)
+    connection = None
+    try:
+        connection = _connect_read_only(db_path)
+        rows = _fetch_dicts(connection, query)
+    except (DatabaseConfigurationError, DatabaseConnectionError):
+        raise
+    except Exception as exc:
+        raise RuntimeError(
+            "Failed to load stock master from the configured database."
+        ) from exc
+    finally:
+        if connection is not None:
+            _close_connection(connection)
+
+    frame = pd.DataFrame(rows, columns=["stock_code", "stock_name", "market", "sector"])
     frame["name_norm"] = frame["stock_name"].map(normalize_text)
-    return frame[["stock_code", "stock_name", "sector", "name_norm"]]
+    return frame[["stock_code", "stock_name", "market", "sector", "name_norm"]]
 
 
 def load_data_freshness(db_path: Path) -> list[dict[str, object]]:
     query = """
         SELECT
-            data_name,
-            latest_date,
-            record_count
+            *
         FROM v_agent_data_freshness
         ORDER BY data_name
     """
-    with connect_read_only(db_path) as connection:
-        frame = pd.read_sql_query(query, connection)
-    return frame.to_dict(orient="records")
+    connection = None
+    try:
+        connection = _connect_read_only(db_path)
+        rows = _fetch_dicts(connection, query)
+    except (DatabaseConfigurationError, DatabaseConnectionError):
+        raise
+    except Exception as exc:
+        raise RuntimeError(
+            "Failed to load data freshness from the configured database."
+        ) from exc
+    finally:
+        if connection is not None:
+            _close_connection(connection)
+
+    normalized_rows: list[dict[str, object]] = []
+    for row in rows:
+        normalized_rows.append(
+            {
+                "data_name": row.get("data_name"),
+                "latest_date": row.get("latest_date", row.get("latest_value")),
+                "record_count": row.get("record_count"),
+            }
+        )
+    return normalized_rows
 
 
 def match_stocks(question: str, master: pd.DataFrame) -> pd.DataFrame:
@@ -460,6 +535,20 @@ def classify_with_db(
         )
     else:
         matched_stocks = match_stocks(user_question, master)
+
+    explicit_code_matches = re.findall(r"(?<!\d)(\d{4})(?!\d)", user_question)
+    if explicit_code_matches and not stock_candidates and matched_stocks.empty:
+        return (
+            ClassificationResult(
+                status="insufficient",
+                intent="Intent008 単一銘柄分析",
+                entities={},
+                missing_fields=["銘柄"],
+                confidence=0.70,
+            ),
+            stock_candidates,
+            matched_stocks,
+        )
 
     normalized_question = normalize_text(user_question)
     primary_intent, secondary_intents = infer_intent(user_question, matched_stocks)

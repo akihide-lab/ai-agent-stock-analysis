@@ -1,4 +1,4 @@
-"""Generate a stock analysis report from approved SQLite views.
+"""Generate a stock analysis report from approved database views.
 
 The database is opened in read-only mode. Existing analysis and prediction
 functions are reused, while their database-writing entry points are never
@@ -10,10 +10,10 @@ from __future__ import annotations
 import argparse
 import json
 import math
-import sqlite3
+import os
 from datetime import datetime
 from pathlib import Path
-from typing import Iterable
+from typing import Any, Iterable
 
 import pandas as pd
 
@@ -25,7 +25,14 @@ from analysis_extensions import (
     calculate_period_changes,
     fundamental_history,
     generate_charts,
-    load_sector_data,
+)
+from db_connection import (
+    DatabaseConfigurationError,
+    DatabaseConnectionError,
+    connect_database,
+    get_db_type,
+    get_placeholder,
+    get_view_exists_sql,
 )
 from html_report import build_self_contained_html
 from legacy_analysis.correlation_regression_analysis import (
@@ -137,42 +144,78 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def connect_read_only(db_path: Path) -> sqlite3.Connection:
-    resolved = db_path.expanduser().resolve(strict=True)
-    connection = sqlite3.connect(resolved.as_uri() + "?mode=ro", uri=True)
-    connection.execute("PRAGMA query_only=ON")
-    return connection
+class ReportDatabaseError(RuntimeError):
+    """Raised when report generation cannot read the configured database."""
 
 
-def validate_views(connection: sqlite3.Connection) -> None:
-    placeholders = ",".join("?" for _ in ALLOWED_VIEWS)
-    rows = connection.execute(
-        f"""
-        SELECT name
-        FROM sqlite_master
-        WHERE type = 'view'
-          AND name IN ({placeholders})
-        """,
-        tuple(sorted(ALLOWED_VIEWS)),
-    ).fetchall()
-    found = {row[0] for row in rows}
-    missing = ALLOWED_VIEWS - found
+def _sqlite_env_for_path(db_path: Path) -> dict[str, str]:
+    env = dict(os.environ)
+    env["DB_TYPE"] = "sqlite"
+    env["SQLITE_DB_PATH"] = str(db_path)
+    return env
+
+
+def connect_read_only(db_path: Path) -> Any:
+    db_type = get_db_type()
+    env = _sqlite_env_for_path(db_path) if db_type == "sqlite" else None
+    return connect_database(read_only=True, env=env)
+
+
+def _close_connection(connection: Any) -> None:
+    close = getattr(connection, "close", None)
+    if callable(close):
+        close()
+
+
+def _fetchone(connection: Any, sql: str, params: tuple[object, ...] = ()) -> Any:
+    if get_db_type() == "sqlite":
+        return connection.execute(sql, params).fetchone()
+    with connection.cursor() as cursor:
+        cursor.execute(sql, params)
+        return cursor.fetchone()
+
+
+def _view_exists(connection: Any, view_name: str) -> bool:
+    db_type = get_db_type()
+    sql = get_view_exists_sql(db_type)
+    params = (view_name,) if db_type == "sqlite" else (None, view_name)
+    return _fetchone(connection, sql, params) is not None
+
+
+def validate_views(connection: Any) -> None:
+    missing = {
+        view_name
+        for view_name in ALLOWED_VIEWS
+        if not _view_exists(connection, view_name)
+    }
     if missing:
         raise RuntimeError(f"必要なVIEWがありません: {', '.join(sorted(missing))}")
 
 
 def load_report_input(db_path: Path, stock_code: str) -> pd.DataFrame:
+    placeholder = get_placeholder()
     columns = ",\n            ".join(SELECT_COLUMNS)
     query = f"""
         SELECT
             {columns}
         FROM {REPORT_VIEW}
-        WHERE stock_code = ?
+        WHERE stock_code = {placeholder}
         ORDER BY trade_date
     """
-    with connect_read_only(db_path) as connection:
+    connection = None
+    try:
+        connection = connect_read_only(db_path)
         validate_views(connection)
         frame = pd.read_sql_query(query, connection, params=(stock_code,))
+    except (DatabaseConfigurationError, DatabaseConnectionError):
+        raise
+    except Exception:
+        raise ReportDatabaseError(
+            "Failed to load report input from the configured database."
+        ) from None
+    finally:
+        if connection is not None:
+            _close_connection(connection)
 
     if frame.empty:
         raise ValueError(f"銘柄コード {stock_code} のデータがありません。")
@@ -182,6 +225,7 @@ def load_report_input(db_path: Path, stock_code: str) -> pd.DataFrame:
 
 
 def load_database_freshness(db_path: Path, stock_code: str) -> pd.DataFrame:
+    placeholder = get_placeholder()
     checks = [
         ("対象銘柄株価", "SELECT MAX(trade_date) FROM stock_prices WHERE stock_code = ?", (stock_code,), "Yahoo Finance"),
         ("対象銘柄財務", "SELECT MAX(fiscal_year) FROM finance WHERE stock_code = ?", (stock_code,), "Yahoo Finance"),
@@ -196,11 +240,63 @@ def load_database_freshness(db_path: Path, stock_code: str) -> pd.DataFrame:
         ("政策金利", "SELECT MAX(year_month) FROM policy_rate", (), "既存公的統計CSV"),
     ]
     rows = []
-    with connect_read_only(db_path) as connection:
+    connection = None
+    try:
+        connection = connect_read_only(db_path)
         for label, query, params, source in checks:
-            latest = connection.execute(query, params).fetchone()[0]
+            effective_query = query.replace("?", placeholder)
+            latest = _fetchone(connection, effective_query, params)[0]
             rows.append({"data_source": label, "latest": latest, "source": source})
+    except (DatabaseConfigurationError, DatabaseConnectionError):
+        raise
+    except Exception:
+        raise ReportDatabaseError(
+            "Failed to load database freshness from the configured database."
+        ) from None
+    finally:
+        if connection is not None:
+            _close_connection(connection)
     return pd.DataFrame(rows)
+
+
+def load_sector_data(db_path: Path, sector: str) -> pd.DataFrame:
+    placeholder = get_placeholder()
+    query = f"""
+        SELECT
+            stock_code,
+            stock_name,
+            sector,
+            trade_date,
+            close_price,
+            fiscal_year,
+            sales,
+            operating_profit,
+            net_profit,
+            roe,
+            eps,
+            per,
+            pbr,
+            dividend_yield,
+            equity_ratio
+        FROM v_ai_stock_report_input
+        WHERE sector = {placeholder}
+        ORDER BY stock_code, trade_date
+    """
+    connection = None
+    try:
+        connection = connect_read_only(db_path)
+        frame = pd.read_sql_query(query, connection, params=(sector,))
+    except (DatabaseConfigurationError, DatabaseConnectionError):
+        raise
+    except Exception:
+        raise ReportDatabaseError(
+            "Failed to load sector data from the configured database."
+        ) from None
+    finally:
+        if connection is not None:
+            _close_connection(connection)
+    frame["trade_date"] = pd.to_datetime(frame["trade_date"])
+    return frame
 
 
 def prepare_statistical_data(frame: pd.DataFrame) -> pd.DataFrame:
@@ -384,7 +480,7 @@ def build_report(
         f"- 生成日時: {generated_at}",
         f"- 参照DB: `{display_database_label(db_path)}`",
         f"- 参照VIEW: `{REPORT_VIEW}`",
-        "- DB接続: 読み取り専用（`mode=ro`、`PRAGMA query_only=ON`）",
+        "- DB接続: 読み取り専用",
         "- 既存分析ロジック: 相関・回帰・VIF・標準化回帰・予測モデル比較を再利用",
         "",
         "## Web取得・データ鮮度",

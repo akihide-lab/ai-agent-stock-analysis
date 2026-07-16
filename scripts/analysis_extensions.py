@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import math
-import sqlite3
+import os
 from pathlib import Path
+from typing import Any
 
 import matplotlib
 
@@ -12,6 +13,14 @@ matplotlib.use("Agg")
 
 import matplotlib.pyplot as plt
 import pandas as pd
+
+from db_connection import (
+    DatabaseConfigurationError,
+    DatabaseConnectionError,
+    connect_database,
+    get_db_type,
+    get_placeholder,
+)
 
 
 FUNDAMENTAL_COLUMNS = [
@@ -28,11 +37,27 @@ FUNDAMENTAL_COLUMNS = [
 PERIODS = {"1年前": 1, "3年前": 3}
 
 
-def connect_read_only(db_path: Path) -> sqlite3.Connection:
-    resolved = db_path.expanduser().resolve(strict=True)
-    connection = sqlite3.connect(resolved.as_uri() + "?mode=ro", uri=True)
-    connection.execute("PRAGMA query_only=ON")
-    return connection
+class AnalysisExtensionDatabaseError(RuntimeError):
+    """Raised when reporting extensions cannot read the configured database."""
+
+
+def _sqlite_env_for_path(db_path: Path) -> dict[str, str]:
+    env = dict(os.environ)
+    env["DB_TYPE"] = "sqlite"
+    env["SQLITE_DB_PATH"] = str(db_path)
+    return env
+
+
+def connect_read_only(db_path: Path) -> Any:
+    db_type = get_db_type()
+    env = _sqlite_env_for_path(db_path) if db_type == "sqlite" else None
+    return connect_database(read_only=True, env=env)
+
+
+def _close_connection(connection: Any) -> None:
+    close = getattr(connection, "close", None)
+    if callable(close):
+        close()
 
 
 def calculate_period_changes(frame: pd.DataFrame) -> pd.DataFrame:
@@ -111,7 +136,8 @@ def calculate_fundamental_changes(history: pd.DataFrame) -> pd.DataFrame:
 
 
 def load_sector_data(db_path: Path, sector: str) -> pd.DataFrame:
-    query = """
+    placeholder = get_placeholder()
+    query = f"""
         SELECT
             stock_code,
             stock_name,
@@ -129,11 +155,22 @@ def load_sector_data(db_path: Path, sector: str) -> pd.DataFrame:
             dividend_yield,
             equity_ratio
         FROM v_ai_stock_report_input
-        WHERE sector = ?
+        WHERE sector = {placeholder}
         ORDER BY stock_code, trade_date
     """
-    with connect_read_only(db_path) as connection:
+    connection = None
+    try:
+        connection = connect_read_only(db_path)
         frame = pd.read_sql_query(query, connection, params=(sector,))
+    except (DatabaseConfigurationError, DatabaseConnectionError):
+        raise
+    except Exception:
+        raise AnalysisExtensionDatabaseError(
+            "Failed to load sector data from the configured database."
+        ) from None
+    finally:
+        if connection is not None:
+            _close_connection(connection)
     frame["trade_date"] = pd.to_datetime(frame["trade_date"])
     return frame
 

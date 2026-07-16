@@ -187,6 +187,51 @@ CSV 入力元の優先順位:
 - `v_stock_fundamental`
 - `v_macro_economic`
 
+## SQLite / PostgreSQL 対応
+
+本プロジェクトは、ローカル SQLite と AWS RDS PostgreSQL の両方に対応しています。接続先は `.env` または環境変数の `DB_TYPE` で切り替えます。
+
+```text
+DB_TYPE=sqlite
+→ SQLite
+
+DB_TYPE=postgres
+→ PostgreSQL
+```
+
+```text
+.env / 環境変数
+        ↓
+     DB_TYPE
+   ┌────┴────┐
+ SQLite   PostgreSQL
+   └────┬────┘
+        ↓
+ db_connection.py
+        ↓
+ rdb_retriever.py
+        ↓
+ analysis_connector.py
+        ↓
+ AIエージェント
+```
+
+PostgreSQL 対応では、SQLite から AWS RDS PostgreSQL へ主要データを移行し、PostgreSQL 向け分析 VIEW を作成しています。検証 DB と本番 DB で読み取り確認を行い、9202 の分析、HTML 生成、ANA の名前解決、9999 の安全停止を確認済みです。
+
+移行・再構築資材は [database/postgres/README.md](database/postgres/README.md) を参照してください。
+
+安全性に関する方針:
+
+- 接続情報は Git 管理しません。
+- AI エージェントの分析経路は SELECT 中心です。
+- PostgreSQL 利用時は SQLite 用更新スクリプトを自動実行しません。
+- 本番 DB へ移行・再構築する前に、RDS スナップショットまたは `pg_dump` によるバックアップを推奨します。
+
+既知の注意点:
+
+- PostgreSQL では `pandas.read_sql_query()` の SQLAlchemy 推奨警告が出る場合があります。現状は処理成功を確認済みです。
+- 財務年度は DB により期末日、または年度キーで表示される場合があります。例: `2025-03-31` と `2024` は同じ 2025 年 3 月期を指す表現差です。
+
 ## 8. 今後の予定
 
 - 空の SQLite DB から初期スキーマを作成するスクリプトの追加

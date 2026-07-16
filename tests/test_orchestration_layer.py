@@ -6,6 +6,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 import pandas as pd
@@ -158,28 +159,145 @@ class OrchestrationLayerTest(unittest.TestCase):
         self.assertEqual(result.decision.route, "system_error")
         self.assertIn("処理中にシステム側の問題", result.decision.message)
 
-    def test_skip_web_update_true_uses_existing_db_report_path(self) -> None:
+    def test_no_direct_database_patterns_in_orchestrator(self) -> None:
+        source = Path(orchestrator.__file__).read_text(encoding="utf-8")
+
+        self.assertNotIn("sqlite3", source)
+        self.assertNotIn("sqlite_master", source)
+        self.assertNotIn("PRAGMA", source)
+        self.assertNotIn("connect_database", source)
+
+    def test_postgres_ready_single_stock_uses_analysis_connector_without_sqlite_path(self) -> None:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp_dir:
+            db_path = Path(temp_dir) / "missing.db"
+            master = pd.DataFrame(
+                columns=["stock_code", "stock_name", "market", "sector", "name_norm"]
+            )
+            classification = question_agent.ClassificationResult(
+                status="classified",
+                intent="Intent008 蜊倅ｸ驫俶氛蛻・梵",
+                entities={
+                    "銘柄": [
+                        {
+                            "stock_code": "9202",
+                            "stock_name": "ANAホールディングス",
+                            "sector": "航空",
+                        }
+                    ]
+                },
+                confidence=0.90,
+            )
+            analysis_result = SimpleNamespace(
+                succeeded=True,
+                report_path=str(Path(temp_dir) / "report.html"),
+                followup_question=None,
+                route="single_stock_report",
+            )
+            with mock.patch.dict("os.environ", {"DB_TYPE": "postgres"}, clear=False):
+                with mock.patch.object(orchestrator.qa, "load_stock_master", return_value=master):
+                    with mock.patch.object(
+                        orchestrator.qa,
+                        "classify_with_db",
+                        return_value=(classification, [], pd.DataFrame()),
+                    ):
+                        with mock.patch.object(orchestrator.qa, "load_data_freshness", return_value=[]):
+                            with mock.patch.object(
+                                orchestrator,
+                                "run_v1_analysis_flow",
+                                return_value=analysis_result,
+                            ) as run_flow:
+                                with mock.patch.object(dispatcher, "execute") as execute:
+                                    result = orchestrator.run(
+                                        args_for(
+                                            "9202を分析して",
+                                            db_path,
+                                            skip_web_update=True,
+                                            dry_run=False,
+                                        )
+                                    )
+
+        self.assertEqual(result.state, AgentState.COMPLETED)
+        self.assertEqual(result.workflow_name, SINGLE_STOCK_ANALYSIS)
+        execute.assert_not_called()
+        run_flow.assert_called_once()
+        self.assertEqual(run_flow.call_args.kwargs["db_path"], db_path)
+        self.assertTrue(run_flow.call_args.kwargs["generate_report"])
+        self.assertFalse(run_flow.call_args.kwargs["allow_update"])
+
+    def test_postgres_followup_does_not_start_analysis_connector(self) -> None:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp_dir:
+            db_path = Path(temp_dir) / "missing.db"
+            master = pd.DataFrame(
+                columns=["stock_code", "stock_name", "market", "sector", "name_norm"]
+            )
+            classification = question_agent.ClassificationResult(
+                status="insufficient",
+                intent="Intent008 蜊倅ｸ驫俶氛蛻・梵",
+                missing_fields=["銘柄"],
+                confidence=0.70,
+            )
+            with mock.patch.dict("os.environ", {"DB_TYPE": "postgres"}, clear=False):
+                with mock.patch.object(orchestrator.qa, "load_stock_master", return_value=master):
+                    with mock.patch.object(
+                        orchestrator.qa,
+                        "classify_with_db",
+                        return_value=(classification, [], pd.DataFrame()),
+                    ):
+                        with mock.patch.object(orchestrator, "run_v1_analysis_flow") as run_flow:
+                            result = orchestrator.run(
+                                args_for("9999を分析して", db_path, dry_run=False)
+                            )
+
+        self.assertEqual(result.state, AgentState.NEEDS_FOLLOWUP)
+        self.assertEqual(result.workflow_name, FOLLOWUP_REQUIRED)
+        run_flow.assert_not_called()
+
+    def test_skip_web_update_true_uses_analysis_connector(self) -> None:
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp_dir:
             db_path = Path(temp_dir) / "stocks.db"
             make_db(db_path)
             fake_report = Path(temp_dir) / "report.html"
-            with mock.patch.object(dispatcher.qa, "run_report", return_value=fake_report) as run_report:
+            analysis_result = SimpleNamespace(
+                succeeded=True,
+                report_path=str(fake_report),
+                followup_question=None,
+                route="single_stock_report",
+            )
+            with mock.patch.object(
+                dispatcher,
+                "run_v1_analysis_flow",
+                return_value=analysis_result,
+            ) as run_flow:
                 result = orchestrator.run(args_for("7203を分析して", db_path, skip_web_update=True))
 
         self.assertEqual(result.workflow_name, SINGLE_STOCK_ANALYSIS)
-        run_report.assert_called_once_with("7203", db_path.resolve(), True, False)
+        run_flow.assert_called_once()
+        self.assertEqual(run_flow.call_args.kwargs["question"], "7203")
+        self.assertFalse(run_flow.call_args.kwargs["allow_update"])
         self.assertEqual(result.decision.report_path, str(fake_report))
 
-    def test_skip_web_update_false_uses_analyze_stock_route(self) -> None:
+    def test_skip_web_update_false_allows_analysis_connector_update(self) -> None:
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp_dir:
             db_path = Path(temp_dir) / "stocks.db"
             make_db(db_path)
             fake_report = Path(temp_dir) / "report.html"
-            with mock.patch.object(dispatcher.qa, "run_report", return_value=fake_report) as run_report:
+            analysis_result = SimpleNamespace(
+                succeeded=True,
+                report_path=str(fake_report),
+                followup_question=None,
+                route="single_stock_report",
+            )
+            with mock.patch.object(
+                dispatcher,
+                "run_v1_analysis_flow",
+                return_value=analysis_result,
+            ) as run_flow:
                 result = orchestrator.run(args_for("7203を分析して", db_path, skip_web_update=False))
 
         self.assertEqual(result.workflow_name, SINGLE_STOCK_ANALYSIS)
-        run_report.assert_called_once_with("7203", db_path.resolve(), False, False)
+        run_flow.assert_called_once()
+        self.assertEqual(run_flow.call_args.kwargs["question"], "7203")
+        self.assertTrue(run_flow.call_args.kwargs["allow_update"])
 
     def test_dispatcher_only_executes_selected_terminal_workflow(self) -> None:
         decision = question_agent.QuestionDecision(
@@ -187,7 +305,7 @@ class OrchestrationLayerTest(unittest.TestCase):
             primary_intent="Intent001 おすすめ銘柄検索",
             message="投資目的を教えてください。",
         )
-        with mock.patch.object(dispatcher.qa, "run_report") as run_report:
+        with mock.patch.object(dispatcher, "run_v1_analysis_flow") as run_flow:
             result = dispatcher.execute(
                 get_workflow(FOLLOWUP_REQUIRED),
                 decision=decision,
@@ -199,7 +317,7 @@ class OrchestrationLayerTest(unittest.TestCase):
             )
 
         self.assertTrue(result.succeeded)
-        run_report.assert_not_called()
+        run_flow.assert_not_called()
 
     def test_stock_screening_dispatcher_selects_candidate_without_own_judgment(self) -> None:
         decision = question_agent.QuestionDecision(
@@ -211,7 +329,7 @@ class OrchestrationLayerTest(unittest.TestCase):
             [{"stock_code": "7203", "stock_name": "トヨタ自動車"}]
         )
         with mock.patch.object(dispatcher.qa, "select_candidate", return_value=(candidates, ["reason"])):
-            with mock.patch.object(dispatcher.qa, "run_report") as run_report:
+            with mock.patch.object(dispatcher, "run_v1_analysis_flow") as run_flow:
                 result = dispatcher.execute(
                     get_workflow(STOCK_SCREENING),
                     decision=decision,
@@ -224,7 +342,7 @@ class OrchestrationLayerTest(unittest.TestCase):
 
         self.assertTrue(result.succeeded)
         self.assertEqual(decision.selected_stock_code, "7203")
-        run_report.assert_not_called()
+        run_flow.assert_not_called()
 
 
 if __name__ == "__main__":

@@ -2,10 +2,19 @@
 
 from __future__ import annotations
 
+import os
 import re
-import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
+
+from db_connection import (
+    DatabaseConfigurationError,
+    DatabaseConnectionError,
+    connect_database,
+    get_db_type,
+    get_placeholder,
+)
 
 
 @dataclass
@@ -15,6 +24,10 @@ class StockCandidate:
     market: str | None = None
     sector: str | None = None
     match_type: str = ""
+
+
+class StockNameResolverDatabaseError(RuntimeError):
+    """Raised when stock name resolution cannot query the configured DB."""
 
 
 ALIAS_DICT = {
@@ -83,7 +96,8 @@ class StockNameResolver:
             return []
 
         candidates: list[StockCandidate] = []
-        with self._connect_read_only() as connection:
+        connection = self._connect_read_only()
+        try:
             for keyword in keywords:
                 candidates = self._search_by_code(connection, keyword)
                 if candidates:
@@ -108,6 +122,10 @@ class StockNameResolver:
 
             for keyword in keywords:
                 candidates += self._search_by_partial_name(connection, keyword)
+        finally:
+            close = getattr(connection, "close", None)
+            if callable(close):
+                close()
 
         return self._deduplicate(candidates)
 
@@ -128,12 +146,14 @@ class StockNameResolver:
                     known_codes.add(fallback.stock_code)
         return combined
 
-    def _connect_read_only(self) -> sqlite3.Connection:
-        resolved = self.db_path.expanduser().resolve(strict=True)
-        connection = sqlite3.connect(resolved.as_uri() + "?mode=ro", uri=True)
-        connection.row_factory = sqlite3.Row
-        connection.execute("PRAGMA query_only=ON")
-        return connection
+    def _connect_read_only(self) -> Any:
+        db_type = get_db_type()
+        env = None
+        if db_type == "sqlite":
+            env = dict(os.environ)
+            env["DB_TYPE"] = "sqlite"
+            env["SQLITE_DB_PATH"] = str(self.db_path)
+        return connect_database(read_only=True, env=env)
 
     def _keywords(self, user_input: str) -> list[str]:
         text = str(user_input or "").strip()
@@ -158,13 +178,14 @@ class StockNameResolver:
                 ordered.append(term)
         return ordered
 
-    def _search_by_code(self, connection: sqlite3.Connection, keyword: str) -> list[StockCandidate]:
+    def _search_by_code(self, connection: Any, keyword: str) -> list[StockCandidate]:
+        placeholder = get_placeholder()
         return self._fetch(
             connection,
-            """
+            f"""
             SELECT stock_code, stock_name, market, sector
             FROM v_agent_stock_master
-            WHERE stock_code = ?
+            WHERE stock_code = {placeholder}
             """,
             (keyword,),
             "code_exact",
@@ -172,16 +193,17 @@ class StockNameResolver:
 
     def _search_by_exact_name(
         self,
-        connection: sqlite3.Connection,
+        connection: Any,
         keyword: str,
         match_type: str = "name_exact",
     ) -> list[StockCandidate]:
+        placeholder = get_placeholder()
         return self._fetch(
             connection,
-            """
+            f"""
             SELECT stock_code, stock_name, market, sector
             FROM v_agent_stock_master
-            WHERE stock_name = ?
+            WHERE stock_name = {placeholder}
             """,
             (keyword,),
             match_type,
@@ -189,15 +211,16 @@ class StockNameResolver:
 
     def _search_by_partial_name(
         self,
-        connection: sqlite3.Connection,
+        connection: Any,
         keyword: str,
     ) -> list[StockCandidate]:
+        placeholder = get_placeholder()
         return self._fetch(
             connection,
-            """
+            f"""
             SELECT stock_code, stock_name, market, sector
             FROM v_agent_stock_master
-            WHERE stock_name LIKE ?
+            WHERE stock_name LIKE {placeholder}
             ORDER BY stock_code
             LIMIT 10
             """,
@@ -207,12 +230,19 @@ class StockNameResolver:
 
     def _fetch(
         self,
-        connection: sqlite3.Connection,
+        connection: Any,
         sql: str,
         params: tuple[object, ...],
         match_type: str,
     ) -> list[StockCandidate]:
-        rows = connection.execute(sql, params).fetchall()
+        try:
+            rows = self._fetch_dicts(connection, sql, params)
+        except (DatabaseConfigurationError, DatabaseConnectionError):
+            raise
+        except Exception as exc:
+            raise StockNameResolverDatabaseError(
+                "Failed to resolve stock names from the configured database."
+            ) from None
         return [
             StockCandidate(
                 stock_code=str(row["stock_code"]),
@@ -223,6 +253,23 @@ class StockNameResolver:
             )
             for row in rows
         ]
+
+    def _fetch_dicts(
+        self,
+        connection: Any,
+        sql: str,
+        params: tuple[object, ...],
+    ) -> list[dict[str, Any]]:
+        db_type = get_db_type()
+        if db_type == "sqlite":
+            cursor = connection.execute(sql, params)
+            columns = [description[0] for description in cursor.description]
+            return [dict(zip(columns, row)) for row in cursor.fetchall()]
+
+        with connection.cursor() as cursor:
+            cursor.execute(sql, params)
+            columns = [description[0] for description in cursor.description]
+            return [dict(zip(columns, row)) for row in cursor.fetchall()]
 
     def _deduplicate(self, candidates: list[StockCandidate]) -> list[StockCandidate]:
         seen: set[str] = set()

@@ -8,6 +8,7 @@ from typing import Any
 
 import pandas as pd
 
+from analysis_connector import run_v1_analysis_flow
 import question_agent as qa
 from workflows import (
     FOLLOWUP_REQUIRED,
@@ -59,6 +60,7 @@ def execute(
             skip_web_update=skip_web_update,
             skip_finance=skip_finance,
             dry_run=dry_run,
+            limit=limit,
         )
 
     if workflow.name == STOCK_SCREENING:
@@ -83,6 +85,7 @@ def _execute_single_stock_analysis(
     skip_web_update: bool,
     skip_finance: bool,
     dry_run: bool,
+    limit: int,
 ) -> DispatchResult:
     if not getattr(decision, "selected_stock_code", None):
         return DispatchResult(
@@ -95,16 +98,42 @@ def _execute_single_stock_analysis(
     if dry_run:
         return DispatchResult(workflow_name=workflow.name, succeeded=True)
 
-    report_path = qa.run_report(
-        str(decision.selected_stock_code),
-        db_path,
-        skip_web_update,
-        skip_finance,
+    return _run_single_stock_flow(
+        workflow,
+        stock_code=str(decision.selected_stock_code),
+        db_path=db_path,
+        skip_web_update=skip_web_update,
+        skip_finance=skip_finance,
+        limit=limit,
+    )
+
+
+def _run_single_stock_flow(
+    workflow: WorkflowDefinition,
+    *,
+    stock_code: str,
+    db_path: Path,
+    skip_web_update: bool,
+    skip_finance: bool,
+    limit: int,
+) -> DispatchResult:
+    result = run_v1_analysis_flow(
+        question=stock_code,
+        intent_id="Intent008",
+        db_path=db_path,
+        output_json=None,
+        generate_report=True,
+        allow_update=not skip_web_update,
+        limit=limit,
+        skip_finance=skip_finance,
     )
     return DispatchResult(
         workflow_name=workflow.name,
-        succeeded=True,
-        report_path=str(report_path),
+        succeeded=bool(result.succeeded),
+        report_path=result.report_path,
+        message=result.followup_question or "",
+        error=None if result.succeeded else result.route,
+        metadata={"route": result.route},
     )
 
 
@@ -144,13 +173,20 @@ def _execute_stock_screening(
 
     report_path = None
     if not dry_run:
-        report_path = qa.run_report(
-            decision.selected_stock_code,
-            db_path,
-            skip_web_update,
-            skip_finance,
+        dispatched = _run_single_stock_flow(
+            workflow,
+            stock_code=decision.selected_stock_code,
+            db_path=db_path,
+            skip_web_update=skip_web_update,
+            skip_finance=skip_finance,
+            limit=limit,
         )
-        decision.report_path = str(report_path)
+        if not dispatched.succeeded:
+            dispatched.candidates = candidates
+            dispatched.reasons = reasons
+            return dispatched
+        report_path = dispatched.report_path
+        decision.report_path = str(report_path) if report_path else None
 
     return DispatchResult(
         workflow_name=workflow.name,
