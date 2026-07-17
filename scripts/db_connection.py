@@ -7,13 +7,16 @@ shared connection layer that later steps can adopt incrementally.
 from __future__ import annotations
 
 import os
+import json
 import sqlite3
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Mapping
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_SQLITE_DB_PATH = PROJECT_ROOT / "data" / "market_analysis.db"
+LOG_DIRECTORY = PROJECT_ROOT / "logs"
 SUPPORTED_DB_TYPES = {"sqlite", "postgres"}
 ENV_FILES = (
     PROJECT_ROOT / ".env",
@@ -28,6 +31,92 @@ class DatabaseConfigurationError(RuntimeError):
 
 class DatabaseConnectionError(RuntimeError):
     """Raised when a database connection cannot be created safely."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        diagnostics: Mapping[str, Any] | None = None,
+        user_message: str | None = None,
+        diagnostic_log_path: Path | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.diagnostics = dict(diagnostics or {})
+        self.user_message = user_message or message
+        self.diagnostic_log_path = diagnostic_log_path
+
+
+def _safe_connection_error_category(exc: Exception) -> str:
+    message = str(exc).lower()
+
+    if "permission denied" in message or "10013" in message:
+        return "network_permission_denied"
+    if "timeout" in message or "timed out" in message:
+        return "connection_timeout"
+    if "password authentication failed" in message:
+        return "authentication_failed"
+    if "does not exist" in message:
+        return "database_not_found"
+    if "could not translate host name" in message or "name or service not known" in message:
+        return "host_resolution_failed"
+    if "ssl" in message:
+        return "ssl_error"
+    return "unknown_connection_error"
+
+
+def _safe_connection_error_message(category: str) -> str:
+    messages = {
+        "network_permission_denied": "Permission denied while opening the network connection.",
+        "connection_timeout": "Connection timed out while opening the network connection.",
+        "authentication_failed": "PostgreSQL authentication failed.",
+        "database_not_found": "PostgreSQL database was not found.",
+        "host_resolution_failed": "PostgreSQL host name could not be resolved.",
+        "ssl_error": "PostgreSQL SSL connection failed.",
+        "unknown_connection_error": "PostgreSQL connection failed for an unknown reason.",
+    }
+    return messages.get(category, messages["unknown_connection_error"])
+
+
+def _safe_postgres_user_message(category: str) -> str:
+    if category in {"network_permission_denied", "connection_timeout", "host_resolution_failed"}:
+        return (
+            "PostgreSQLへの接続に失敗しました。"
+            "ネットワーク接続、接続許可、DB稼働状態を確認してください。"
+        )
+    if category == "authentication_failed":
+        return "PostgreSQLへの認証に失敗しました。接続設定を確認してください。"
+    if category == "database_not_found":
+        return "PostgreSQLの接続先データベースを確認してください。"
+    if category == "ssl_error":
+        return "PostgreSQLへのSSL接続に失敗しました。接続設定を確認してください。"
+    return "PostgreSQLへの接続に失敗しました。接続設定と実行環境を確認してください。"
+
+
+def _write_postgres_connection_diagnostic(
+    exc: Exception,
+    *,
+    category: str,
+    read_only: bool,
+) -> Path | None:
+    payload = {
+        "timestamp": datetime.now().astimezone().isoformat(),
+        "db_type": "postgres",
+        "stage": "postgres_connect",
+        "read_only": read_only,
+        "exception_type": type(exc).__name__,
+        "category": category,
+        "message": _safe_connection_error_message(category),
+    }
+    try:
+        LOG_DIRECTORY.mkdir(exist_ok=True)
+        path = LOG_DIRECTORY / (
+            f"postgres_connection_diagnostic_"
+            f"{datetime.now().astimezone():%Y%m%d_%H%M%S_%f}.json"
+        )
+        path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        return path
+    except OSError:
+        return None
 
 
 def _load_env_files() -> None:
@@ -177,8 +266,24 @@ def connect_postgres(
                 cursor.execute("SET SESSION CHARACTERISTICS AS TRANSACTION READ ONLY")
         return connection
     except Exception as exc:
+        category = _safe_connection_error_category(exc)
+        diagnostics = {
+            "db_type": "postgres",
+            "stage": "postgres_connect",
+            "exception_type": type(exc).__name__,
+            "category": category,
+            "message": _safe_connection_error_message(category),
+        }
+        diagnostic_log_path = _write_postgres_connection_diagnostic(
+            exc,
+            category=category,
+            read_only=read_only,
+        )
         raise DatabaseConnectionError(
-            "Failed to connect to PostgreSQL database."
+            "Failed to connect to PostgreSQL database.",
+            diagnostics=diagnostics,
+            user_message=_safe_postgres_user_message(category),
+            diagnostic_log_path=diagnostic_log_path,
         ) from None
 
 

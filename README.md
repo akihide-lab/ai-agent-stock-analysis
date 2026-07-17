@@ -225,12 +225,15 @@ PostgreSQL 対応では、SQLite から AWS RDS PostgreSQL へ主要データを
 - 接続情報は Git 管理しません。
 - AI エージェントの分析経路は SELECT 中心です。
 - PostgreSQL 利用時は SQLite 用更新スクリプトを自動実行しません。
+- PostgreSQL 接続失敗時の診断ログには、パスワード、DSN、RDS エンドポイント全文、ユーザー名、`.env` 内容を出しません。
 - 本番 DB へ移行・再構築する前に、RDS スナップショットまたは `pg_dump` によるバックアップを推奨します。
 
 既知の注意点:
 
 - PostgreSQL では `pandas.read_sql_query()` の SQLAlchemy 推奨警告が出る場合があります。現状は処理成功を確認済みです。
 - 財務年度は DB により期末日、または年度キーで表示される場合があります。例: `2025-03-31` と `2024` は同じ 2025 年 3 月期を指す表現差です。
+- Codex の通常サンドボックス内では、RDS への外部 TCP 接続が実行環境の制限で失敗する場合があります。`Permission denied (10013)` などは即座にアプリケーション不具合と判断せず、通常 PowerShell または承認付き実行で `smoke_test_connection()` を再確認します。
+- PostgreSQL 接続診断と実接続テストの運用は [docs/postgres_connection_diagnostics.md](docs/postgres_connection_diagnostics.md) を参照してください。
 
 ## 8. 今後の予定
 
