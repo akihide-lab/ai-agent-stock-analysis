@@ -38,6 +38,8 @@ MARKET_TICKERS = {
     "usd_jpy": "USDJPY=X",
     "wti_price": "CL=F",
 }
+MIN_FETCHED_STOCK_ROWS = 20
+MIN_FETCH_RATIO_FOR_EXISTING_HISTORY = 0.5
 
 
 def parse_args() -> argparse.Namespace:
@@ -271,20 +273,77 @@ def fetch_all_sources(
     return fetched, failures
 
 
-def replace_stock_prices(
+def stock_price_summary(
+    connection: sqlite3.Connection,
+    stock_code: str,
+) -> dict[str, Any]:
+    count, min_date, max_date = connection.execute(
+        """
+        SELECT COUNT(*), MIN(trade_date), MAX(trade_date)
+        FROM stock_prices
+        WHERE stock_code = ?
+        """,
+        (stock_code,),
+    ).fetchone()
+    return {
+        "count": int(count or 0),
+        "min_date": min_date,
+        "max_date": max_date,
+    }
+
+
+def fetched_stock_price_summary(frame: pd.DataFrame) -> dict[str, Any]:
+    valid = frame.dropna(subset=["Close"])
+    return {
+        "count": int(len(valid)),
+        "min_date": None if valid.empty else str(valid["date"].min()),
+        "max_date": None if valid.empty else str(valid["date"].max()),
+    }
+
+
+def validate_stock_price_fetch(
+    stock_code: str,
+    before: dict[str, Any],
+    fetched: dict[str, Any],
+) -> None:
+    fetched_count = int(fetched["count"])
+    before_count = int(before["count"])
+    if fetched_count < MIN_FETCHED_STOCK_ROWS:
+        raise RuntimeError(
+            f"stock_prices:{stock_code} fetched too few rows: {fetched_count}"
+        )
+    if before_count >= MIN_FETCHED_STOCK_ROWS and fetched_count < before_count * MIN_FETCH_RATIO_FOR_EXISTING_HISTORY:
+        raise RuntimeError(
+            f"stock_prices:{stock_code} fetched row count looks partial: "
+            f"before={before_count}, fetched={fetched_count}"
+        )
+
+
+def upsert_stock_prices(
     connection: sqlite3.Connection,
     frames: dict[str, pd.DataFrame],
-) -> None:
-    sql = """
+) -> dict[str, dict[str, Any]]:
+    insert_sql = """
         INSERT INTO stock_prices (
             stock_code, trade_date, open_price, high_price,
             low_price, close_price, volume
         ) VALUES (?, ?, ?, ?, ?, ?, ?)
     """
+    update_sql = """
+        UPDATE stock_prices
+        SET open_price = ?,
+            high_price = ?,
+            low_price = ?,
+            close_price = ?,
+            volume = ?
+        WHERE stock_code = ?
+          AND trade_date = ?
+    """
+    summaries: dict[str, dict[str, Any]] = {}
     for stock_code, frame in frames.items():
-        connection.execute(
-            "DELETE FROM stock_prices WHERE stock_code = ?", (stock_code,)
-        )
+        before = stock_price_summary(connection, stock_code)
+        fetched = fetched_stock_price_summary(frame)
+        validate_stock_price_fetch(stock_code, before, fetched)
         rows = [
             (
                 stock_code,
@@ -298,7 +357,40 @@ def replace_stock_prices(
             for _, row in frame.iterrows()
             if pd.notna(row["Close"])
         ]
-        connection.executemany(sql, rows)
+        for row in rows:
+            _, trade_date, open_price, high_price, low_price, close_price, volume = row
+            cursor = connection.execute(
+                update_sql,
+                (
+                    open_price,
+                    high_price,
+                    low_price,
+                    close_price,
+                    volume,
+                    stock_code,
+                    trade_date,
+                ),
+            )
+            if cursor.rowcount == 0:
+                connection.execute(insert_sql, row)
+        after = stock_price_summary(connection, stock_code)
+        if int(after["count"]) < int(before["count"]):
+            raise RuntimeError(
+                f"stock_prices:{stock_code} row count decreased after update: "
+                f"before={before['count']}, after={after['count']}"
+            )
+        summaries[stock_code] = {
+            "before_count": before["count"],
+            "before_min_date": before["min_date"],
+            "before_max_date": before["max_date"],
+            "fetched_count": fetched["count"],
+            "fetched_min_date": fetched["min_date"],
+            "fetched_max_date": fetched["max_date"],
+            "after_count": after["count"],
+            "after_min_date": after["min_date"],
+            "after_max_date": after["max_date"],
+        }
+    return summaries
 
 
 def replace_finance(
@@ -571,7 +663,10 @@ def main() -> None:
             connection.execute("PRAGMA foreign_keys=ON")
             connection.execute("BEGIN")
             comparisons = filter_newer_than_database(connection, fetched)
-            replace_stock_prices(connection, fetched["stock_prices"])
+            stock_price_update_summaries = upsert_stock_prices(
+                connection,
+                fetched["stock_prices"],
+            )
             replace_finance(connection, fetched["finance"])
             replace_simple_market_tables(connection, fetched["market"])
             connection.commit()
@@ -596,6 +691,7 @@ def main() -> None:
         "market_successes": sorted(fetched["market"]),
         "failures": failures,
         "comparisons": comparisons,
+        "stock_price_update_summaries": stock_price_update_summaries,
         "validation": validation,
         "not_updated": [
             "cpi",
