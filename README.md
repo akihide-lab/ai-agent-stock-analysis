@@ -249,3 +249,115 @@ PostgreSQL 対応では、SQLite から AWS RDS PostgreSQL へ主要データを
 このプロジェクトは MIT License で公開しています。
 
 詳細は `LICENSE` を参照してください。
+## 10. ChromaDB / RAG文書の再構築
+
+### 役割
+
+`chroma_db/` は、RAG検索で使うローカルChromaDBです。`scripts/rag_retriever.py` がこのDBを読み取り、ユーザー質問に関連する補足文書を検索します。
+
+`chroma_db/` は生成物のためGit管理しません。GitHubには、DB本体ではなく、元文書、再構築スクリプト、テスト、手順を登録します。
+
+### 元文書の配置場所
+
+Markdownまたはテキストファイルを `rag_documents/` 配下に配置します。サブディレクトリも再帰的に読み込まれます。
+
+対象拡張子:
+
+- `.md`
+- `.txt`
+
+サンプル文書は `rag_documents/sample/` にあります。
+
+### ChromaDBの作成コマンド
+
+Windows PowerShell:
+
+```powershell
+.\.venv\Scripts\python.exe .\scripts\build_chroma_db.py
+```
+
+macOS / Linux / AWS EC2:
+
+```bash
+./.venv/bin/python scripts/build_chroma_db.py
+```
+
+既定では、以下の入出力を使います。
+
+- 入力元: `rag_documents/`
+- 保存先: `chroma_db/`
+- コレクション名: `news_chunks`
+
+チャンクサイズを変える場合:
+
+```powershell
+.\.venv\Scripts\python.exe .\scripts\build_chroma_db.py --chunk-size 800 --chunk-overlap 120
+```
+
+再構築時は、一時ディレクトリに新DBを作成し、成功後に `chroma_db/` を置き換えます。既存データへ無制限に追加しません。
+
+### 検索確認
+
+ChromaDB作成後は、まず `scripts.rag_retriever.search_rag_context()` を直接呼び出して、ChromaDB単体の検索結果を確認します。
+これはRAG検索だけの確認であり、AIエージェント全体の分析フロー確認とは別です。
+`analysis_connector.py` は Intent 判定と銘柄必須条件を通過した後にRAG検索へ進みます。
+
+Windows PowerShell:
+
+```powershell
+.\.venv\Scripts\python.exe -c "from scripts.rag_retriever import search_rag_context; from scripts.query_flow_models import DataSourcePlan, QueryFlowInput; q=QueryFlowInput(user_question='AIエージェントとは何ですか？', primary_intent='Intent008'); p=DataSourcePlan(intent_id='Intent008', action_name='rag_check', rdb_targets=[], rag_targets=['news'], next_flow='rag_check'); results,warnings=search_rag_context(q,p); print('results:', len(results)); print('warnings:', warnings); print('document:', results[0].document if results else '')"
+```
+
+macOS / Linux / AWS EC2:
+
+```bash
+./.venv/bin/python -c 'from scripts.rag_retriever import search_rag_context; from scripts.query_flow_models import DataSourcePlan, QueryFlowInput; q=QueryFlowInput(user_question="AIエージェントとは何ですか？", primary_intent="Intent008"); p=DataSourcePlan(intent_id="Intent008", action_name="rag_check", rdb_targets=[], rag_targets=["news"], next_flow="rag_check"); results,warnings=search_rag_context(q,p); print("results:", len(results)); print("warnings:", warnings); print("document:", results[0].document if results else "")'
+```
+
+ChromaDB単体の検索確認後、銘柄を含む質問でAIエージェント全体の流れを確認します。
+
+```powershell
+.\.venv\Scripts\python.exe .\scripts\analysis_connector.py "トヨタを分析して" --intent-id Intent008 --context-only --no-update
+```
+
+DBなしでRAG部分を継続的に確認したい場合は、単体・統合テストを実行します。
+
+```powershell
+.\.venv\Scripts\python.exe -m unittest tests.test_build_chroma_db
+```
+
+### AWS EC2での再現手順
+
+```bash
+git clone <repository-url>
+cd <repository-directory>
+python3 -m venv .venv
+./.venv/bin/python -m pip install --upgrade pip
+./.venv/bin/python -m pip install -r requirements.txt
+
+# 必要なMarkdown/TXTをrag_documents/配下へ配置
+./.venv/bin/python scripts/build_chroma_db.py
+
+# RAG検索確認
+./.venv/bin/python -c 'from scripts.rag_retriever import search_rag_context; from scripts.query_flow_models import DataSourcePlan, QueryFlowInput; q=QueryFlowInput(user_question="AIエージェントとは何ですか？", primary_intent="Intent008"); p=DataSourcePlan(intent_id="Intent008", action_name="rag_check", rdb_targets=[], rag_targets=["news"], next_flow="rag_check"); results,warnings=search_rag_context(q,p); print("results:", len(results)); print("warnings:", warnings); print("document:", results[0].document if results else "")'
+
+# AIエージェント実行例
+./.venv/bin/python scripts/question_agent.py "トヨタを分析して" --skip-web-update
+```
+
+### Git管理
+
+GitHubへ登録するもの:
+
+- `scripts/build_chroma_db.py`
+- `tests/test_build_chroma_db.py`
+- `rag_documents/` 配下の元文書
+- READMEの再構築手順
+
+GitHubへ登録しないもの:
+
+- `chroma_db/`
+- `chroma.sqlite3`
+- ChromaDB内部のUUIDディレクトリ
+- `.env`
+- ローカル絶対パス

@@ -18,6 +18,16 @@ DEFAULT_CHROMA_DIR = PROJECT_ROOT / "chroma_db"
 DEFAULT_COLLECTION_NAMES = ("news_chunks", "documents")
 
 
+def _stop_chroma_client(client: Any) -> None:
+    system = getattr(client, "_system", None)
+    stop = getattr(system, "stop", None)
+    if callable(stop):
+        stop()
+    clear = getattr(client, "clear_system_cache", None)
+    if callable(clear):
+        clear()
+
+
 def build_rag_query(query: QueryFlowInput, plan: DataSourcePlan) -> str:
     parts = [query.user_question, plan.intent_id, plan.action_name]
     stocks = query.entities.get("stocks") or query.entities.get("stock_code")
@@ -52,33 +62,36 @@ def search_rag_context(
         return search_chroma_sqlite_fallback(query, chroma_dir, n_results), warnings
 
     client = chromadb.PersistentClient(path=str(chroma_dir))
-    query_text = build_rag_query(query, plan)
+    try:
+        query_text = build_rag_query(query, plan)
 
-    for collection_name in collection_names:
-        try:
-            collection = client.get_collection(name=collection_name)
-            raw_results: dict[str, Any] = collection.query(
-                query_texts=[query_text],
-                n_results=n_results,
-            )
-            documents = raw_results.get("documents", [[]])[0]
-            metadatas = raw_results.get("metadatas", [[]])[0]
-            distances = raw_results.get("distances", [[]])[0]
-            ids = raw_results.get("ids", [[]])[0]
-
-            results = []
-            for index, document in enumerate(documents):
-                results.append(
-                    RagDocument(
-                        document=document,
-                        metadata=metadatas[index] if index < len(metadatas) else {},
-                        distance=distances[index] if index < len(distances) else None,
-                        document_id=ids[index] if index < len(ids) else None,
-                    )
+        for collection_name in collection_names:
+            try:
+                collection = client.get_collection(name=collection_name)
+                raw_results: dict[str, Any] = collection.query(
+                    query_texts=[query_text],
+                    n_results=n_results,
                 )
-            return results, warnings
-        except Exception as exc:
-            warnings.append(f"RAG collection skipped ({collection_name}): {exc}")
+                documents = raw_results.get("documents", [[]])[0]
+                metadatas = raw_results.get("metadatas", [[]])[0]
+                distances = raw_results.get("distances", [[]])[0]
+                ids = raw_results.get("ids", [[]])[0]
+
+                results = []
+                for index, document in enumerate(documents):
+                    results.append(
+                        RagDocument(
+                            document=document,
+                            metadata=metadatas[index] if index < len(metadatas) else {},
+                            distance=distances[index] if index < len(distances) else None,
+                            document_id=ids[index] if index < len(ids) else None,
+                        )
+                    )
+                return results, warnings
+            except Exception as exc:
+                warnings.append(f"RAG collection skipped ({collection_name}): {exc}")
+    finally:
+        _stop_chroma_client(client)
 
     return [], warnings
 

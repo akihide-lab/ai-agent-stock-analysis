@@ -1,0 +1,5 @@
+このサンプル文書は、ChromaDB再構築と検索確認のためのテキストです。
+
+ローカル環境とAWS EC2環境では、同じrag_documents配下のMarkdownまたはTXTファイルを使ってChromaDBを再構築できます。
+
+生成されたchroma_dbディレクトリは実行時の生成物であり、Git管理には含めません。
