@@ -35,6 +35,7 @@ from db_connection import (
     get_view_exists_sql,
 )
 from html_report import build_self_contained_html
+from s3_uploader import upload_report_to_s3
 from legacy_analysis.correlation_regression_analysis import (
     calculate_correlation,
     calculate_standardized_regression,
@@ -854,6 +855,12 @@ def generate_report(
         title,
     )
     destination.write_text(html_report, encoding="utf-8")
+    try:
+        upload_report_to_s3(str(destination))
+    except Exception as exc:
+        print("[WARNING] S3アップロード処理中に予期しないエラーが発生しました")
+        print(f"対象: {destination}")
+        print(f"理由: {exc}")
     return destination
 
 

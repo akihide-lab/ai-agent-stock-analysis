@@ -361,3 +361,42 @@ GitHubへ登録しないもの:
 - ChromaDB内部のUUIDディレクトリ
 - `.env`
 - ローカル絶対パス
+## S3レポートアップロード
+
+HTMLレポート生成後、環境変数 `ENABLE_S3_UPLOAD` が有効な場合だけ、生成済みのHTMLレポートをS3へアップロードできます。ローカル環境ではデフォルト無効で、従来どおり `reports/` 配下へのローカル保存のみ行います。
+
+EC2などのクラウド環境では、AWSアクセスキーやシークレットキーを `.env` やコードへ追加せず、EC2に付与したIAMロールで `boto3.client("s3")` が認証情報を自動取得する構成にします。
+
+必要な環境変数:
+
+```env
+ENABLE_S3_UPLOAD=false
+S3_BUCKET_NAME=
+S3_REPORT_PREFIX=reports
+```
+
+EC2で有効化する例:
+
+```env
+ENABLE_S3_UPLOAD=true
+S3_BUCKET_NAME=stock-analysis-akihide-2026
+S3_REPORT_PREFIX=reports
+```
+
+`ENABLE_S3_UPLOAD` は `true`, `1`, `yes`, `on` を有効として扱います。大文字・小文字は区別しません。未設定、`false`、その他の値ではアップロードしません。
+
+実行例:
+
+```bash
+python scripts/analyze_stock.py 7203 \
+  --skip-web-update \
+  --output reports/stock_report_7203_ec2.html
+```
+
+設定が有効な場合のS3保存先形式:
+
+```text
+s3://<bucket-name>/reports/stock_report_7203_ec2.html
+```
+
+S3アップロードに失敗した場合でも、分析とローカルHTMLレポート生成は成功扱いのままです。失敗内容は警告として対象ファイルと理由を標準出力へ表示します。
