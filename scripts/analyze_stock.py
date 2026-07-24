@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import sys
 from pathlib import Path
 
 from analysis_connector import run_v1_analysis_flow
 from generate_stock_report import DEFAULT_DB_PATH
+from logging_config import setup_logging
 from query_flow_models import to_plain_data
 
 
@@ -69,6 +71,8 @@ def _print_result(result: object, output_json: Path | None) -> int:
 
 
 def main() -> None:
+    setup_logging()
+    logging.getLogger(__name__).info("analyze_stock started")
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     args = parse_args()

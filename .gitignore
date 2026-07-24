@@ -8,6 +8,7 @@ __pycache__/
 .env
 .env.*
 !.env.example
+config/.env
 *.log
 *.tmp
 *.temp
