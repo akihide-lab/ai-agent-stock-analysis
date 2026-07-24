@@ -1,0 +1,20 @@
+{
+  "agent": {
+    "metrics_collection_interval": 60,
+    "run_as_user": "cwagent"
+  },
+  "logs": {
+    "logs_collected": {
+      "files": {
+        "collect_list": [
+          {
+            "file_path": "/home/ec2-user/ai-agent-stock-analysis/logs/agent.log",
+            "log_group_class": "STANDARD",
+            "log_group_name": "ai-agent-stock-analysis",
+            "log_stream_name": "{instance_id}"
+          }
+        ]
+      }
+    }
+  }
+}

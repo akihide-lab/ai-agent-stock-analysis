@@ -65,6 +65,28 @@ flowchart TD
 - `update_market_data.py`: 既存 DB の市場データ更新
 - `update_macro_from_existing.py`: CSV 由来のマクロデータ更新
 
+## アプリケーションログと CloudWatch Logs
+
+`scripts/analyze_stock.py` は、処理開始時に Python logging を初期化し、アプリケーションログを `logs/agent.log` へ出力します。ログはファイルと標準出力の両方へ INFO レベルで出力されます。
+
+AWS 環境では CloudWatch Agent を使い、`logs/agent.log` を CloudWatch Logs へ転送できます。
+
+```text
+AIエージェント
+↓
+Python logging
+↓
+logs/agent.log
+↓
+CloudWatch Agent
+↓
+CloudWatch Logs
+```
+
+CloudWatch Logs のロググループ名は `ai-agent-stock-analysis`、ログストリーム名は EC2 インスタンスIDを使う構成を想定しています。
+
+ログ確認の主な用途は、処理開始、処理終了、DB接続、分析開始、レポート生成、S3アップロード、エラー確認です。詳細な設定手順と CloudWatch Agent の設定例は [docs/aws/cloudwatch_logging.md](docs/aws/cloudwatch_logging.md) と [config/cloudwatch-agent-example.json](config/cloudwatch-agent-example.json) を参照してください。
+
 ## 3. 主な機能
 
 - 自然言語の株式関連依頼を Domain / Intent / Entity に整理
