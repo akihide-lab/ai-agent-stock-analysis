@@ -3,6 +3,7 @@ boto3
 requests
 psycopg[binary]
 python-dotenv
+pymongo
 matplotlib
 markdown-it-py
 chromadb

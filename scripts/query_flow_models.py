@@ -72,9 +72,36 @@ class RagDocument:
 
 
 @dataclass
+class NewsDocument:
+    stock_code: str
+    company_name: str | None = None
+    title: str = ""
+    body: str = ""
+    url: str = ""
+    published_at: Any = None
+    fetched_at: Any = None
+    source: str | None = None
+    category: str | None = None
+    vector_status: str = "pending"
+    document_id: str | None = None
+
+
+@dataclass
+class NewsAnalysis:
+    summary: str = ""
+    positive_factors: list[str] = field(default_factory=list)
+    negative_factors: list[str] = field(default_factory=list)
+    short_term_impact: str = ""
+    medium_long_term_impact: str = ""
+    uncertainty: str = ""
+    source_count: int = 0
+
+
+@dataclass
 class RetrievedContext:
     rdb_results: list[RdbResult] = field(default_factory=list)
     rag_results: list[RagDocument] = field(default_factory=list)
+    news_documents: list[NewsDocument] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
 
 
@@ -86,6 +113,7 @@ class AnalysisContext:
     selected_stock_code: str | None = None
     selected_stock_name: str | None = None
     comparison_stock_codes: list[str] = field(default_factory=list)
+    news_analysis: NewsAnalysis | None = None
     supplemental_text_context: str = ""
     warnings: list[str] = field(default_factory=list)
 

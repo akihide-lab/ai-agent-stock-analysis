@@ -6,6 +6,8 @@ try:
     from .query_flow_models import (
         AnalysisContext,
         DataSourcePlan,
+        NewsAnalysis,
+        NewsDocument,
         QueryFlowInput,
         RagDocument,
         RdbResult,
@@ -15,6 +17,8 @@ except ImportError:
     from query_flow_models import (
         AnalysisContext,
         DataSourcePlan,
+        NewsAnalysis,
+        NewsDocument,
         QueryFlowInput,
         RagDocument,
         RdbResult,
@@ -68,12 +72,24 @@ def aggregate_context(
     plan: DataSourcePlan,
     rdb_results: list[RdbResult],
     rag_results: list[RagDocument],
+    news_documents: list[NewsDocument] | None = None,
+    news_analysis: NewsAnalysis | None = None,
     warnings: list[str] | None = None,
 ) -> AnalysisContext:
+    if warnings is None and news_analysis is not None and isinstance(news_analysis, list):
+        warnings = news_analysis
+        news_analysis = None
+    if warnings is None and news_documents and all(
+        isinstance(item, str) for item in news_documents
+    ):
+        warnings = list(news_documents)
+        news_documents = []
+
     selected_code, selected_name = _first_stock_from_results(rdb_results)
     retrieved = RetrievedContext(
         rdb_results=rdb_results,
         rag_results=rag_results,
+        news_documents=list(news_documents or []),
         warnings=list(warnings or []),
     )
     return AnalysisContext(
@@ -83,6 +99,7 @@ def aggregate_context(
         selected_stock_code=selected_code,
         selected_stock_name=selected_name,
         comparison_stock_codes=_comparison_codes(rdb_results),
+        news_analysis=news_analysis,
         supplemental_text_context=build_supplemental_text_context(rag_results),
         warnings=list(warnings or []),
     )

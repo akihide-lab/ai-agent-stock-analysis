@@ -422,3 +422,32 @@ s3://<bucket-name>/reports/stock_report_7203_ec2.html
 ```
 
 S3アップロードに失敗した場合でも、分析とローカルHTMLレポート生成は成功扱いのままです。失敗内容は警告として対象ファイルと理由を標準出力へ表示します。
+
+## ニュース取得・MongoDB連携
+
+Google News RSSから対象銘柄の関連ニュースを取得し、
+MongoDBへニュース原文とメタデータを保存します。
+
+同一URLはupsertで更新されるため、
+重複ドキュメントは作成されません。
+
+取得した最新ニュースは、
+株価・財務などの数値データとは分離してContextへ追加し、
+レポートの「最新ニュース」と
+「ニュースから見た注目ポイント」に表示します。
+
+ニュース取得とMongoDB連携は環境変数で無効化できます。
+`MONGODB_ENABLED=false` の場合はMongoDBへ接続せず、
+`NEWS_FETCH_ENABLED=false` の場合はGoogle News RSSから外部取得しません。
+
+### 環境変数
+
+```env
+MONGODB_ENABLED=false
+MONGODB_URI=
+MONGODB_DATABASE=stock_analysis
+MONGODB_NEWS_COLLECTION=news
+
+NEWS_FETCH_ENABLED=false
+NEWS_FETCH_LIMIT=5
+```

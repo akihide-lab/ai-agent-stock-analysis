@@ -67,7 +67,11 @@ class AnalysisConnectorBoundaryTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             db_path = Path(temp_dir) / "missing" / "market_analysis.db"
             report_path = Path(temp_dir) / "report.html"
-            with patch.dict("os.environ", {"DB_TYPE": "postgres"}, clear=False):
+            with patch.dict(
+                "os.environ",
+                {"DB_TYPE": "postgres", "MONGODB_ENABLED": "false"},
+                clear=False,
+            ):
                 with patch.object(
                     connector.StockNameResolver,
                     "resolve",
@@ -98,12 +102,16 @@ class AnalysisConnectorBoundaryTests(unittest.TestCase):
                                 )
 
         self.assertTrue(result.succeeded)
-        generate_report.assert_called_once_with("9202", db_path, None, None)
+        generate_report.assert_called_once_with("9202", db_path, None, None, [], None)
 
     def test_postgres_insufficient_data_skips_sqlite_update_and_report(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             db_path = Path(temp_dir) / "missing" / "market_analysis.db"
-            with patch.dict("os.environ", {"DB_TYPE": "postgres"}, clear=False):
+            with patch.dict(
+                "os.environ",
+                {"DB_TYPE": "postgres", "MONGODB_ENABLED": "false"},
+                clear=False,
+            ):
                 with patch.object(
                     connector.StockNameResolver,
                     "resolve",

@@ -379,6 +379,90 @@ def markdown_table(
     return "\n".join(lines)
 
 
+def _news_to_dict(news: Any) -> dict[str, Any]:
+    return news.__dict__ if hasattr(news, "__dict__") else dict(news)
+
+
+def _is_public_news(news: dict[str, Any]) -> bool:
+    source = str(news.get("source") or "").lower()
+    url = str(news.get("url") or "").lower()
+    return source != "sample_news" and "example.com" not in url
+
+
+def build_latest_news_section(
+    news_documents: list[Any] | None,
+    stock_code: str,
+    stock_name: str,
+) -> list[str]:
+    lines = ["## 最新ニュース", ""]
+    public_news = [
+        _news_to_dict(news)
+        for news in news_documents or []
+        if _is_public_news(_news_to_dict(news))
+    ]
+    if not public_news:
+        return [*lines, "現在、関連ニュースはありません。", ""]
+
+    for index, item in enumerate(public_news, start=1):
+        published_at = item.get("published_at")
+        lines.extend(
+            [
+                f"### {index}. {item.get('title') or 'No title'}",
+                "",
+                f"- 銘柄コード: {item.get('stock_code') or stock_code}",
+                f"- 会社名: {item.get('company_name') or stock_name}",
+                f"- 出典: {item.get('source') or 'unknown'}",
+                f"- 公開日時: {published_at or 'unknown'}",
+                f"- URL: {item.get('url') or 'unknown'}",
+                f"- 概要: {item.get('body') or '概要は取得できませんでした。'}",
+                "",
+            ]
+        )
+    return lines
+
+
+def build_news_analysis_section(news_analysis: Any | None) -> list[str]:
+    lines = ["## ニュースから見た注目ポイント", ""]
+    if not news_analysis:
+        return [
+            *lines,
+            "ニュースが取得できなかったため、ニュースに基づく考察は行っていません。",
+            "",
+        ]
+    item = news_analysis.__dict__ if hasattr(news_analysis, "__dict__") else dict(news_analysis)
+    positives = item.get("positive_factors") or []
+    negatives = item.get("negative_factors") or []
+    lines.extend(
+        [
+            str(item.get("summary") or ""),
+            "",
+            "### プラス要因",
+            "",
+            *[f"- {factor}" for factor in positives],
+            *([] if positives else ["- 明確なプラス要因は取得ニュースからは確認できません。"]),
+            "",
+            "### マイナス要因",
+            "",
+            *[f"- {factor}" for factor in negatives],
+            *([] if negatives else ["- 明確なマイナス要因は取得ニュースからは確認できません。"]),
+            "",
+            "### 短期的な影響",
+            "",
+            str(item.get("short_term_impact") or ""),
+            "",
+            "### 中長期的な影響",
+            "",
+            str(item.get("medium_long_term_impact") or ""),
+            "",
+            "### 不確実性",
+            "",
+            str(item.get("uncertainty") or ""),
+            "",
+        ]
+    )
+    return lines
+
+
 def build_interpretation(results: dict[str, pd.DataFrame]) -> list[str]:
     correlation = results["correlation"].dropna(subset=["correlation"]).copy()
     correlation["absolute"] = correlation["correlation"].abs()
@@ -423,6 +507,8 @@ def build_report(
     narrative: list[str],
     database_freshness: pd.DataFrame,
     acquisition: dict[str, object] | None,
+    news_documents: list[Any] | None,
+    news_analysis: Any | None,
     db_path: Path,
 ) -> str:
     latest = frame.sort_values("trade_date").iloc[-1]
@@ -543,6 +629,9 @@ def build_report(
             )
         else:
             lines.extend(["今回のWeb取得で失敗した対象はありません。", ""])
+
+    lines.extend(build_latest_news_section(news_documents, stock_code, stock_name))
+    lines.extend(build_news_analysis_section(news_analysis))
 
     lines.extend(
         [
@@ -786,6 +875,8 @@ def generate_report(
     db_path: Path,
     output_path: Path | None = None,
     acquisition: dict[str, object] | None = None,
+    news_documents: list[Any] | None = None,
+    news_analysis: Any | None = None,
 ) -> Path:
     destination = output_path or (
         DEFAULT_REPORT_DIR / f"stock_report_{stock_code}.html"
@@ -842,6 +933,8 @@ def generate_report(
         narrative,
         database_freshness,
         acquisition,
+        news_documents,
+        news_analysis,
         db_path,
     )
 

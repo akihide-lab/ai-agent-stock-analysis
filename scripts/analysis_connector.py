@@ -14,6 +14,10 @@ try:
     from .data_source_rules import build_data_source_plan
     from .followup_question_builder import FollowupQuestionBuilder
     from .intent_actions import normalize_intent_id
+    from .mongodb_news_repository import fetch_mongodb_news_for_stock
+    from .mongodb_news_repository import get_news_repository_from_env, mongodb_enabled
+    from .news_analysis import build_news_analysis
+    from .news_fetcher import fetch_news_for_stock, news_fetch_enabled, news_fetch_limit
     from .query_flow_models import (
         AnalysisRunResult,
         MissingInformation,
@@ -29,6 +33,10 @@ except ImportError:
     from data_source_rules import build_data_source_plan
     from followup_question_builder import FollowupQuestionBuilder
     from intent_actions import normalize_intent_id
+    from mongodb_news_repository import fetch_mongodb_news_for_stock
+    from mongodb_news_repository import get_news_repository_from_env, mongodb_enabled
+    from news_analysis import build_news_analysis
+    from news_fetcher import fetch_news_for_stock, news_fetch_enabled, news_fetch_limit
     from query_flow_models import (
         AnalysisRunResult,
         MissingInformation,
@@ -209,6 +217,43 @@ def _db_path_for_existing_report(db_path: Path) -> Path:
     return db_path.expanduser()
 
 
+def _fetch_and_store_latest_news(
+    stock_code: str | None,
+    company_name: str | None,
+) -> list[str]:
+    if not stock_code or not news_fetch_enabled():
+        return []
+
+    warnings: list[str] = []
+    fetch_result = fetch_news_for_stock(
+        stock_code=stock_code,
+        company_name=company_name,
+        limit=news_fetch_limit(),
+    )
+    warnings.extend(fetch_result.warnings)
+    if not fetch_result.news_items:
+        return warnings
+
+    if not mongodb_enabled():
+        warnings.append("News storage skipped because MONGODB_ENABLED is false.")
+        return warnings
+
+    client = None
+    try:
+        client, repository = get_news_repository_from_env()
+        repository.save_many(fetch_result.news_items)
+    except Exception as exc:
+        warnings.append(f"News storage failed: {exc}")
+    finally:
+        if client is not None:
+            client.close()
+    return warnings
+
+
+def _news_result_limit(flow_limit: int) -> int:
+    return min(max(news_fetch_limit(), flow_limit, 5), 10)
+
+
 def run_v1_analysis_flow(
     question: str,
     intent_id: str | None = None,
@@ -288,6 +333,28 @@ def run_v1_analysis_flow(
             ]
             context = aggregate_context(query, plan, rdb_results, rag_results, warnings)
 
+    warnings.extend(
+        _fetch_and_store_latest_news(
+            context.selected_stock_code,
+            context.selected_stock_name,
+        )
+    )
+    news_documents, news_warnings = fetch_mongodb_news_for_stock(
+        context.selected_stock_code,
+        limit=_news_result_limit(limit),
+    )
+    warnings.extend(news_warnings)
+    news_analysis = build_news_analysis(news_documents)
+    context = aggregate_context(
+        query,
+        plan,
+        rdb_results,
+        rag_results,
+        news_documents,
+        news_analysis,
+        warnings,
+    )
+
     complete_rows = _complete_rows(context)
     if (
         allow_update
@@ -338,13 +405,33 @@ def run_v1_analysis_flow(
             chroma_dir=chroma_dir,
             n_results=min(limit, 10),
         )
+        warnings.extend(
+            _fetch_and_store_latest_news(
+                context.selected_stock_code,
+                context.selected_stock_name,
+            )
+        )
+        news_documents, news_warnings = fetch_mongodb_news_for_stock(
+            context.selected_stock_code,
+            limit=_news_result_limit(limit),
+        )
+        news_analysis = build_news_analysis(news_documents)
         warnings = [
             *warnings,
             "Data freshness was rechecked after update.",
             *rdb_warnings,
             *rag_warnings,
+            *news_warnings,
         ]
-        context = aggregate_context(query, plan, rdb_results, rag_results, warnings)
+        context = aggregate_context(
+            query,
+            plan,
+            rdb_results,
+            rag_results,
+            news_documents,
+            news_analysis,
+            warnings,
+        )
 
     route = plan.next_flow
     report_path = None
@@ -364,6 +451,8 @@ def run_v1_analysis_flow(
                     _db_path_for_existing_report(db_path),
                     output_path,
                     None,
+                    context.retrieved_context.news_documents,
+                    context.news_analysis,
                 )
                 report_path = str(report)
                 succeeded = True
