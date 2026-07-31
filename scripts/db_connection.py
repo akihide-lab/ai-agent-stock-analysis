@@ -119,7 +119,16 @@ def _write_postgres_connection_diagnostic(
         return None
 
 
-def _load_env_files() -> None:
+def _clean_env_value(value: str) -> str:
+    cleaned = value.strip().strip('"').strip("'")
+    for marker in ("←", " #"):
+        if marker in cleaned:
+            cleaned = cleaned.split(marker, 1)[0].strip()
+    return cleaned.strip().strip('"').strip("'")
+
+
+def _load_env_files() -> dict[str, str]:
+    loaded: dict[str, str] = {}
     for path in ENV_FILES:
         if not path.is_file():
             continue
@@ -129,20 +138,24 @@ def _load_env_files() -> None:
                 if not line or line.startswith("#") or "=" not in line:
                     continue
                 key, value = line.split("=", 1)
-                key = key.strip()
-                value = value.strip().strip('"').strip("'")
-                if key and key not in os.environ:
-                    os.environ[key] = value
+                key = key.strip().lstrip("\ufeff")
+                value = _clean_env_value(value)
+                if key:
+                    loaded[key] = value
         except OSError as exc:
             raise DatabaseConfigurationError(
                 "Failed to read database environment configuration."
             ) from exc
+    return loaded
 
 
 def _env_value(name: str, env: Mapping[str, str] | None = None) -> str:
+    file_values: dict[str, str] = {}
     if env is None:
-        _load_env_files()
-    source = os.environ if env is None else env
+        file_values = _load_env_files()
+        if name == "DB_TYPE" and name in os.environ:
+            return str(os.environ.get(name, "")).strip()
+    source = {**os.environ, **file_values} if env is None else env
     return str(source.get(name, "")).strip()
 
 

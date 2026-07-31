@@ -218,9 +218,13 @@ def _build_domain_stop(
 
 
 def _db_path_for_orchestration(db_path: Path) -> Path:
-    if get_db_type() == "sqlite":
+    if _effective_db_type(db_path) == "sqlite":
         return db_path.expanduser().resolve(strict=True)
     return db_path.expanduser()
+
+
+def _effective_db_type(db_path: Path) -> str:
+    return "sqlite" if db_path.exists() else get_db_type()
 
 
 def _execute_ready_workflow(
@@ -234,7 +238,7 @@ def _execute_ready_workflow(
     limit: int,
 ) -> dispatcher.DispatchResult:
     if (
-        get_db_type() == "postgres"
+        _effective_db_type(db_path) == "postgres"
         and workflow.name == SINGLE_STOCK_ANALYSIS
         and not dry_run
     ):

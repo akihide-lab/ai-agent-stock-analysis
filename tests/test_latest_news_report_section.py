@@ -10,7 +10,11 @@ SCRIPT_DIR = PROJECT_ROOT / "scripts"
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
-from generate_stock_report import build_latest_news_section, build_news_analysis_section
+from generate_stock_report import (
+    build_latest_news_section,
+    build_news_analysis_section,
+    build_snowflake_analysis_section,
+)
 from query_flow_models import NewsAnalysis
 from query_flow_models import NewsDocument
 
@@ -98,6 +102,41 @@ class LatestNewsReportSectionTests(unittest.TestCase):
         self.assertIn("プラス材料", section)
         self.assertIn("注意材料", section)
         self.assertNotIn("MongoDB", section)
+
+    def test_snowflake_section_is_hidden_without_rows(self) -> None:
+        self.assertEqual(build_snowflake_analysis_section({"rows": []}), [])
+
+    def test_snowflake_section_displays_mart_rows(self) -> None:
+        section = "\n".join(
+            build_snowflake_analysis_section(
+                {
+                    "rows": [
+                        {
+                            "stock_code": "9202",
+                            "trade_date": "2026-07-01",
+                            "close_price": 100,
+                            "volume": 1000,
+                            "sales": 10000,
+                            "usd_jpy": 160,
+                            "nikkei_close": 40000,
+                        },
+                        {
+                            "stock_code": "9202",
+                            "trade_date": "2026-07-02",
+                            "close_price": 110,
+                            "volume": 1200,
+                            "sales": 10000,
+                            "usd_jpy": 161,
+                            "nikkei_close": 40100,
+                        },
+                    ]
+                }
+            )
+        )
+
+        self.assertIn("## Snowflake分析基盤による集計", section)
+        self.assertIn("期間変化率", section)
+        self.assertIn("データ件数", section)
 
 
 if __name__ == "__main__":

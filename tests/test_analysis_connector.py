@@ -102,7 +102,11 @@ class AnalysisConnectorBoundaryTests(unittest.TestCase):
                                 )
 
         self.assertTrue(result.succeeded)
-        generate_report.assert_called_once_with("9202", db_path, None, None, [], None)
+        generate_report.assert_called_once()
+        args = generate_report.call_args.args
+        self.assertEqual(args[:6], ("9202", db_path, None, None, [], None))
+        self.assertEqual(args[6].rows, [])
+        self.assertFalse(args[6].metadata["available"])
 
     def test_postgres_insufficient_data_skips_sqlite_update_and_report(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

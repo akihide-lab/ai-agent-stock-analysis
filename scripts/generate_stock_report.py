@@ -463,6 +463,78 @@ def build_news_analysis_section(news_analysis: Any | None) -> list[str]:
     return lines
 
 
+def _snowflake_rows(snowflake_analysis: Any | None) -> list[dict[str, Any]]:
+    if not snowflake_analysis:
+        return []
+    if isinstance(snowflake_analysis, dict):
+        return list(snowflake_analysis.get("rows") or [])
+    return list(getattr(snowflake_analysis, "rows", []) or [])
+
+
+def build_snowflake_analysis_section(snowflake_analysis: Any | None) -> list[str]:
+    rows = _snowflake_rows(snowflake_analysis)
+    if not rows:
+        return []
+
+    frame = pd.DataFrame(rows)
+    frame.columns = [str(column).lower() for column in frame.columns]
+    if "trade_date" in frame:
+        frame["trade_date"] = pd.to_datetime(frame["trade_date"], errors="coerce")
+        frame = frame.sort_values("trade_date")
+
+    latest = frame.iloc[-1].to_dict()
+    first = frame.iloc[0].to_dict()
+    latest_close = latest.get("close_price")
+    first_close = first.get("close_price")
+    change_rate = None
+    if pd.notna(latest_close) and pd.notna(first_close) and float(first_close) != 0:
+        change_rate = (float(latest_close) - float(first_close)) / float(first_close) * 100
+
+    if "volume" in frame and frame["volume"].notna().any():
+        recent_volume = frame["volume"].tail(min(5, len(frame))).mean()
+        overall_volume = frame["volume"].mean()
+        volume_trend = (
+            "直近は期間平均を上回っています。"
+            if recent_volume > overall_volume
+            else "直近は期間平均を下回っています。"
+        )
+    else:
+        volume_trend = "出来高データは利用できません。"
+
+    period_start = first.get("trade_date")
+    period_end = latest.get("trade_date")
+    if hasattr(period_start, "strftime"):
+        period_start = period_start.strftime("%Y-%m-%d")
+    if hasattr(period_end, "strftime"):
+        period_end = period_end.strftime("%Y-%m-%d")
+
+    summary = pd.DataFrame(
+        [
+            {"metric": "取得期間", "value": f"{period_start} ～ {period_end}"},
+            {"metric": "最新株価", "value": latest_close},
+            {"metric": "期間変化率（%）", "value": change_rate},
+            {"metric": "出来高傾向", "value": volume_trend},
+            {"metric": "売上高", "value": latest.get("sales")},
+            {"metric": "営業利益", "value": latest.get("operating_profit")},
+            {"metric": "純利益", "value": latest.get("net_profit")},
+            {"metric": "ROE", "value": latest.get("roe")},
+            {"metric": "PER", "value": latest.get("per")},
+            {"metric": "PBR", "value": latest.get("pbr")},
+            {"metric": "配当利回り", "value": latest.get("dividend_yield")},
+            {"metric": "USD/JPY", "value": latest.get("usd_jpy")},
+            {"metric": "日経平均終値", "value": latest.get("nikkei_close")},
+            {"metric": "データ件数", "value": len(frame)},
+            {"metric": "データ基準日", "value": period_end},
+        ]
+    )
+    return [
+        "## Snowflake分析基盤による集計",
+        "",
+        markdown_table(summary, ["metric", "value"], ["項目", "値"], 4),
+        "",
+    ]
+
+
 def build_interpretation(results: dict[str, pd.DataFrame]) -> list[str]:
     correlation = results["correlation"].dropna(subset=["correlation"]).copy()
     correlation["absolute"] = correlation["correlation"].abs()
@@ -509,6 +581,7 @@ def build_report(
     acquisition: dict[str, object] | None,
     news_documents: list[Any] | None,
     news_analysis: Any | None,
+    snowflake_analysis: Any | None,
     db_path: Path,
 ) -> str:
     latest = frame.sort_values("trade_date").iloc[-1]
@@ -632,6 +705,7 @@ def build_report(
 
     lines.extend(build_latest_news_section(news_documents, stock_code, stock_name))
     lines.extend(build_news_analysis_section(news_analysis))
+    lines.extend(build_snowflake_analysis_section(snowflake_analysis))
 
     lines.extend(
         [
@@ -877,6 +951,7 @@ def generate_report(
     acquisition: dict[str, object] | None = None,
     news_documents: list[Any] | None = None,
     news_analysis: Any | None = None,
+    snowflake_analysis: Any | None = None,
 ) -> Path:
     destination = output_path or (
         DEFAULT_REPORT_DIR / f"stock_report_{stock_code}.html"
@@ -935,6 +1010,7 @@ def generate_report(
         acquisition,
         news_documents,
         news_analysis,
+        snowflake_analysis,
         db_path,
     )
 

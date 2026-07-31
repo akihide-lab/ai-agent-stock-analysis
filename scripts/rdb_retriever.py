@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 import os
+import sqlite3
 from pathlib import Path
 from typing import Any
 
@@ -32,7 +33,7 @@ def _sqlite_env_for_path(db_path: Path) -> dict[str, str]:
 
 
 def connect_read_only(db_path: Path = DEFAULT_DB_PATH) -> Any:
-    db_type = get_db_type()
+    db_type = "sqlite" if db_path.exists() else get_db_type()
     env = _sqlite_env_for_path(db_path) if db_type == "sqlite" else None
     return connect_database(read_only=True, env=env)
 
@@ -43,8 +44,16 @@ def _close_connection(connection: Any) -> None:
         close()
 
 
+def _db_type_for_connection(connection: Any) -> str:
+    return "sqlite" if isinstance(connection, sqlite3.Connection) else "postgres"
+
+
+def _placeholder(connection: Any) -> str:
+    return "?" if _db_type_for_connection(connection) == "sqlite" else "%s"
+
+
 def _fetchall(connection: Any, sql: str, params: tuple[Any, ...] = ()) -> tuple[list[str], list[Any]]:
-    if get_db_type() == "sqlite":
+    if _db_type_for_connection(connection) == "sqlite":
         cursor = connection.execute(sql, params)
         columns = [description[0] for description in cursor.description]
         return columns, cursor.fetchall()
@@ -56,7 +65,7 @@ def _fetchall(connection: Any, sql: str, params: tuple[Any, ...] = ()) -> tuple[
 
 
 def _fetchone(connection: Any, sql: str, params: tuple[Any, ...] = ()) -> Any:
-    if get_db_type() == "sqlite":
+    if _db_type_for_connection(connection) == "sqlite":
         return connection.execute(sql, params).fetchone()
     with connection.cursor() as cursor:
         cursor.execute(sql, params)
@@ -64,7 +73,7 @@ def _fetchone(connection: Any, sql: str, params: tuple[Any, ...] = ()) -> Any:
 
 
 def table_or_view_exists(connection: Any, name: str) -> bool:
-    db_type = get_db_type()
+    db_type = _db_type_for_connection(connection)
     sql = get_view_exists_sql(db_type)
     params = (name,) if db_type == "sqlite" else (None, name)
     return _fetchone(connection, sql, params) is not None
@@ -178,7 +187,7 @@ def fetch_data_freshness(connection: Any) -> RdbResult:
 def fetch_stock_profile(connection: Any, stock_code: str) -> RdbResult:
     rows = []
     if table_or_view_exists(connection, "v_agent_stock_master"):
-        placeholder = get_placeholder()
+        placeholder = _placeholder(connection)
         rows = _rows(
             connection,
             f"""
@@ -198,7 +207,7 @@ def fetch_latest_candidate_row(connection: Any, stock_code: str) -> RdbResult:
             target="latest_candidate_row",
             metadata={"stock_code": stock_code, "available": False},
         )
-    placeholder = get_placeholder()
+    placeholder = _placeholder(connection)
     rows = _rows(
         connection,
         f"""
@@ -223,7 +232,7 @@ def fetch_report_input_summary(connection: Any, stock_code: str) -> RdbResult:
             target="report_input_summary",
             metadata={"stock_code": stock_code, "available": False},
         )
-    placeholder = get_placeholder()
+    placeholder = _placeholder(connection)
     rows = _rows(
         connection,
         f"""
@@ -252,7 +261,7 @@ def fetch_analysis_readiness(connection: Any, stock_code: str) -> RdbResult:
             target="analysis_readiness",
             metadata={"stock_code": stock_code, "available": False},
         )
-    placeholder = get_placeholder()
+    placeholder = _placeholder(connection)
     rows = _rows(
         connection,
         f"""
@@ -309,7 +318,7 @@ def fetch_candidate_stocks(
     elif intent_id == "Intent002":
         order_by = "volume DESC"
 
-    placeholder = get_placeholder()
+    placeholder = _placeholder(connection)
     rows = _rows(
         connection,
         f"""

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import re
+import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -147,13 +148,18 @@ class StockNameResolver:
         return combined
 
     def _connect_read_only(self) -> Any:
-        db_type = get_db_type()
+        db_type = self._db_type()
         env = None
         if db_type == "sqlite":
             env = dict(os.environ)
             env["DB_TYPE"] = "sqlite"
             env["SQLITE_DB_PATH"] = str(self.db_path)
         return connect_database(read_only=True, env=env)
+
+    def _db_type(self) -> str:
+        if self.db_path.exists():
+            return "sqlite"
+        return get_db_type()
 
     def _keywords(self, user_input: str) -> list[str]:
         text = str(user_input or "").strip()
@@ -179,7 +185,7 @@ class StockNameResolver:
         return ordered
 
     def _search_by_code(self, connection: Any, keyword: str) -> list[StockCandidate]:
-        placeholder = get_placeholder()
+        placeholder = get_placeholder(self._db_type())
         return self._fetch(
             connection,
             f"""
@@ -197,7 +203,7 @@ class StockNameResolver:
         keyword: str,
         match_type: str = "name_exact",
     ) -> list[StockCandidate]:
-        placeholder = get_placeholder()
+        placeholder = get_placeholder(self._db_type())
         return self._fetch(
             connection,
             f"""
@@ -214,7 +220,7 @@ class StockNameResolver:
         connection: Any,
         keyword: str,
     ) -> list[StockCandidate]:
-        placeholder = get_placeholder()
+        placeholder = get_placeholder(self._db_type())
         return self._fetch(
             connection,
             f"""
@@ -260,7 +266,7 @@ class StockNameResolver:
         sql: str,
         params: tuple[object, ...],
     ) -> list[dict[str, Any]]:
-        db_type = get_db_type()
+        db_type = "sqlite" if isinstance(connection, sqlite3.Connection) else "postgres"
         if db_type == "sqlite":
             cursor = connection.execute(sql, params)
             columns = [description[0] for description in cursor.description]

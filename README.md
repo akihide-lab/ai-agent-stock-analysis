@@ -6,6 +6,8 @@
 
 数値データはSQLiteまたはPostgreSQLから取得し、関連文書はChromaDB / RAGで検索します。ニュースはGoogle News RSSから取得し、MongoDBへニュース情報・概要・メタデータを保存します。保存したニュース情報は株価・財務などの数値データとは別Contextで扱います。
 
+Snowflakeは任意の分析用DWHとして追加できます。PostgreSQLを置き換えるものではなく、PostgreSQLの元データをPython同期処理でSnowflake RAWへ登録し、CLEAN / MARTで分析用に整形した結果を既存分析Contextへ別枠で追加します。`SNOWFLAKE_ENABLED=false` の場合、従来のSQLite / PostgreSQL / MongoDB / ChromaDB処理だけを実行します。
+
 生成したHTMLレポートはローカルの `reports/` に保存され、必要に応じてS3へアップロードできます。AWS環境では `logs/agent.log` をCloudWatch Logsへ転送して、実行ログを確認できます。
 
 ## 2. デモ成果物
@@ -37,6 +39,7 @@ Start-Process ".\reports\toyota_7203_analysis_20260713.mp4"
 - HTML / Markdownレポート生成
 - S3へのレポートアップロード
 - CloudWatch Logsへのアプリケーションログ転送
+- Snowflake MARTデータの任意追加Context
 - unittestによる自動テスト
 
 ## 4. システム構成
@@ -50,9 +53,11 @@ flowchart TD
     D --> F["Google News RSS"]
     F --> G["MongoDB"]
     D --> H["ChromaDB / RAG"]
+    D --> O["Snowflake MART（任意）"]
     E --> I["分析Context統合"]
     G --> I
     H --> I
+    O --> I
     I --> J["分析・レポート生成"]
     J --> K["HTML / Markdown"]
     K --> L["S3（任意）"]
@@ -67,6 +72,9 @@ flowchart TD
 - `orchestrator.py`: 状態遷移とWorkflow選択
 - `dispatcher.py`: 選択されたWorkflowの実行
 - `analysis_connector.py`: RDB、RAG、ニュース、レポート生成の接続
+- `snowflake_connection.py`: Snowflake接続処理
+- `snowflake_repository.py`: Snowflake RAW登録・MART取得
+- `sync_postgres_to_snowflake.py`: PostgreSQLからSnowflake RAWへの銘柄単位同期
 - `generate_stock_report.py`: HTML / Markdownレポート生成
 - `mongodb_news_repository.py`: MongoDBへのニュース保存・取得
 - `build_chroma_db.py`: RAG文書のChromaDB登録
@@ -88,6 +96,7 @@ flowchart TD
 - AWS RDS
 - AWS S3
 - Amazon CloudWatch Logs
+- Snowflake
 - unittest
 
 ## 6. ディレクトリ構成
@@ -161,6 +170,17 @@ MONGODB_NEWS_COLLECTION=news
 NEWS_FETCH_ENABLED=false
 NEWS_FETCH_LIMIT=5
 
+# Snowflake
+SNOWFLAKE_ENABLED=false
+SNOWFLAKE_ACCOUNT=
+SNOWFLAKE_USER=
+SNOWFLAKE_PASSWORD=
+SNOWFLAKE_WAREHOUSE=AI_AGENT_WH
+SNOWFLAKE_DATABASE=MARKET_ANALYSIS
+SNOWFLAKE_SCHEMA=MART
+SNOWFLAKE_ROLE=
+SNOWFLAKE_ALLOW_ACCOUNTADMIN_SETUP=false
+
 # S3
 ENABLE_S3_UPLOAD=false
 S3_BUCKET_NAME=
@@ -181,6 +201,15 @@ S3_REPORT_PREFIX=reports
 | `ENABLE_S3_UPLOAD` | `true` のときだけ生成HTMLをS3へアップロードします。 |
 | `S3_BUCKET_NAME` | S3アップロード先バケット名です。 |
 | `S3_REPORT_PREFIX` | S3内の保存プレフィックスです。 |
+| `SNOWFLAKE_ENABLED` | `true` のときだけSnowflake MARTを追加取得します。 |
+| `SNOWFLAKE_ACCOUNT` | SnowflakeのAccount Identifierです。実値は `.env` のみに設定します。 |
+| `SNOWFLAKE_USER` | Snowflake接続ユーザーです。 |
+| `SNOWFLAKE_PASSWORD` | Snowflake接続パスワードです。実値は `.env` のみに設定します。 |
+| `SNOWFLAKE_WAREHOUSE` | 利用するWarehouseです。 |
+| `SNOWFLAKE_DATABASE` | 利用するDatabaseです。 |
+| `SNOWFLAKE_SCHEMA` | 接続時の既定Schemaです。MART取得は `MART.STOCK_ANALYSIS` を参照します。 |
+| `SNOWFLAKE_ROLE` | 必要最小権限を付与したRoleです。 |
+| `SNOWFLAKE_ALLOW_ACCOUNTADMIN_SETUP` | 初期構築時だけ `true` にできます。通常運用では `false` のままにし、`ACCOUNTADMIN` 接続を拒否します。 |
 
 ## 9. 実行方法
 
@@ -218,6 +247,20 @@ HTMLレポートは `reports/stock_report_<銘柄コード>.html` に生成さ�
 
 詳細は [docs/rag_setup.md](docs/rag_setup.md) を参照してください。
 
+### PostgreSQLからSnowflake RAWへの同期
+
+Snowflake SQLは `sql/snowflake/` 配下の順に実行して、`RAW`、`CLEAN`、`MART` を作成します。同期は銘柄コード単位で行います。
+
+```powershell
+.\.venv\Scripts\python.exe .\scripts\sync_postgres_to_snowflake.py --stock-code 9202
+```
+
+同期処理はPostgreSQLを読み取り専用で参照し、Snowflakeの `RAW.STOCK_PRICES`、`RAW.FINANCE`、`RAW.MACRO_ECONOMIC` へMERGEします。同じ銘柄を再実行しても、同一キーの重複行を作らない構成です。初期確認では全件同期を避けるため、株価・マクロは直近行数を `--limit` で制御できます。
+
+```powershell
+.\.venv\Scripts\python.exe .\scripts\sync_postgres_to_snowflake.py --stock-code 9202 --limit 200
+```
+
 ## 10. データベース・検索基盤
 
 ### 10.1 SQLite / PostgreSQL
@@ -248,6 +291,25 @@ MongoDB処理は `MONGODB_ENABLED`、Google News RSS取得は `NEWS_FETCH_ENABLE
 ```
 
 詳細は [docs/rag_setup.md](docs/rag_setup.md) を参照してください。
+
+### 10.4 Snowflake
+
+Snowflakeは分析用DWHとして任意で利用します。元データの正本はPostgreSQL、ニュース本文の正本はMongoDB、意味検索はChromaDBに残します。SnowflakeにはPostgreSQL由来の構造化データを同期し、CLEAN VIEWで型統一と重複排除を行い、MART VIEWでレポート用の集計Contextを提供します。
+
+追加する主なオブジェクト:
+
+- Database: `MARKET_ANALYSIS`
+- Warehouse: `AI_AGENT_WH`
+- Schema: `RAW`、`CLEAN`、`MART`
+- RAWテーブル: `RAW.STOCK_PRICES`、`RAW.FINANCE`、`RAW.MACRO_ECONOMIC`
+- CLEAN VIEW: `CLEAN.STOCK_PRICES`、`CLEAN.FINANCE`、`CLEAN.MACRO_ECONOMIC`
+- MART VIEW: `MART.STOCK_ANALYSIS`
+
+Snowflake取得に失敗した場合でも、既存のSQLite / PostgreSQL / MongoDB / ChromaDB分析は継続します。失敗内容は警告としてContextへ記録し、レポート本文にはSnowflake章を表示しません。
+
+Warehouseは `AUTO_SUSPEND` を設定し、利用しない時間帯に自動停止させてSnowflakeの計算コストを管理してください。認証情報、Account Identifier、ユーザー名、パスワードは `.env` のみに保存し、Gitへ登録しないでください。
+
+`ACCOUNTADMIN` は初期構築時のみ使用します。通常運用では `SNOWFLAKE_ALLOW_ACCOUNTADMIN_SETUP=false` のまま、`AI_AGENT_ROLE` などの専用最小権限ロールへ移行してください。専用ロールの権限設計と付与は今後の課題です。
 
 ## 11. AWS連携
 

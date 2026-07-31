@@ -12,6 +12,7 @@ try:
         RagDocument,
         RdbResult,
         RetrievedContext,
+        SnowflakeAnalysis,
     )
 except ImportError:
     from query_flow_models import (
@@ -23,6 +24,7 @@ except ImportError:
         RagDocument,
         RdbResult,
         RetrievedContext,
+        SnowflakeAnalysis,
     )
 
 
@@ -74,6 +76,7 @@ def aggregate_context(
     rag_results: list[RagDocument],
     news_documents: list[NewsDocument] | None = None,
     news_analysis: NewsAnalysis | None = None,
+    snowflake_analysis: SnowflakeAnalysis | None = None,
     warnings: list[str] | None = None,
 ) -> AnalysisContext:
     if warnings is None and news_analysis is not None and isinstance(news_analysis, list):
@@ -90,6 +93,7 @@ def aggregate_context(
         rdb_results=rdb_results,
         rag_results=rag_results,
         news_documents=list(news_documents or []),
+        snowflake_analysis=snowflake_analysis,
         warnings=list(warnings or []),
     )
     return AnalysisContext(

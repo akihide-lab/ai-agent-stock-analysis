@@ -22,11 +22,13 @@ try:
         AnalysisRunResult,
         MissingInformation,
         QueryFlowInput,
+        SnowflakeAnalysis,
         to_plain_data,
     )
     from .db_connection import get_db_type
     from .rag_retriever import DEFAULT_CHROMA_DIR, search_rag_context
     from .rdb_retriever import DEFAULT_DB_PATH, retrieve_rdb_context
+    from .snowflake_repository import fetch_stock_analysis_context
     from .stock_name_resolver import StockCandidate, StockNameResolver
 except ImportError:
     from context_aggregator import aggregate_context
@@ -41,11 +43,13 @@ except ImportError:
         AnalysisRunResult,
         MissingInformation,
         QueryFlowInput,
+        SnowflakeAnalysis,
         to_plain_data,
     )
     from db_connection import get_db_type
     from rag_retriever import DEFAULT_CHROMA_DIR, search_rag_context
     from rdb_retriever import DEFAULT_DB_PATH, retrieve_rdb_context
+    from snowflake_repository import fetch_stock_analysis_context
     from stock_name_resolver import StockCandidate, StockNameResolver
 
 
@@ -254,6 +258,17 @@ def _news_result_limit(flow_limit: int) -> int:
     return min(max(news_fetch_limit(), flow_limit, 5), 10)
 
 
+def _fetch_snowflake_analysis(stock_code: str | None, limit: int) -> SnowflakeAnalysis | None:
+    if not stock_code:
+        return None
+    result = fetch_stock_analysis_context(stock_code, limit=max(limit, 120))
+    return SnowflakeAnalysis(
+        rows=result.get("rows", []),
+        metadata=result.get("metadata", {}),
+        warnings=result.get("warnings", []),
+    )
+
+
 def run_v1_analysis_flow(
     question: str,
     intent_id: str | None = None,
@@ -345,6 +360,9 @@ def run_v1_analysis_flow(
     )
     warnings.extend(news_warnings)
     news_analysis = build_news_analysis(news_documents)
+    snowflake_analysis = _fetch_snowflake_analysis(context.selected_stock_code, limit)
+    if snowflake_analysis:
+        warnings.extend(snowflake_analysis.warnings)
     context = aggregate_context(
         query,
         plan,
@@ -352,6 +370,7 @@ def run_v1_analysis_flow(
         rag_results,
         news_documents,
         news_analysis,
+        snowflake_analysis,
         warnings,
     )
 
@@ -416,6 +435,9 @@ def run_v1_analysis_flow(
             limit=_news_result_limit(limit),
         )
         news_analysis = build_news_analysis(news_documents)
+        snowflake_analysis = _fetch_snowflake_analysis(context.selected_stock_code, limit)
+        if snowflake_analysis:
+            warnings.extend(snowflake_analysis.warnings)
         warnings = [
             *warnings,
             "Data freshness was rechecked after update.",
@@ -430,6 +452,7 @@ def run_v1_analysis_flow(
             rag_results,
             news_documents,
             news_analysis,
+            snowflake_analysis,
             warnings,
         )
 
@@ -453,6 +476,7 @@ def run_v1_analysis_flow(
                     None,
                     context.retrieved_context.news_documents,
                     context.news_analysis,
+                    context.retrieved_context.snowflake_analysis,
                 )
                 report_path = str(report)
                 succeeded = True

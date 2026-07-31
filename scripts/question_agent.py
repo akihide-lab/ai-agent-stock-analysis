@@ -7,6 +7,7 @@ import json
 import logging
 import os
 import re
+import sqlite3
 import subprocess
 import sys
 import traceback
@@ -304,7 +305,7 @@ def _sqlite_env_for_path(db_path: Path) -> dict[str, str]:
 
 
 def _connect_read_only(db_path: Path) -> Any:
-    db_type = get_db_type()
+    db_type = "sqlite" if db_path.exists() else get_db_type()
     env = _sqlite_env_for_path(db_path) if db_type == "sqlite" else None
     return connect_database(read_only=True, env=env)
 
@@ -320,7 +321,7 @@ def _fetch_dicts(
     sql: str,
     params: tuple[object, ...] = (),
 ) -> list[dict[str, object]]:
-    if get_db_type() == "sqlite":
+    if isinstance(connection, sqlite3.Connection):
         cursor = connection.execute(sql, params)
         columns = [description[0] for description in cursor.description]
         return [dict(zip(columns, row)) for row in cursor.fetchall()]

@@ -98,10 +98,18 @@ class NewsAnalysis:
 
 
 @dataclass
+class SnowflakeAnalysis:
+    rows: list[dict[str, Any]] = field(default_factory=list)
+    metadata: dict[str, Any] = field(default_factory=dict)
+    warnings: list[str] = field(default_factory=list)
+
+
+@dataclass
 class RetrievedContext:
     rdb_results: list[RdbResult] = field(default_factory=list)
     rag_results: list[RagDocument] = field(default_factory=list)
     news_documents: list[NewsDocument] = field(default_factory=list)
+    snowflake_analysis: SnowflakeAnalysis | None = None
     warnings: list[str] = field(default_factory=list)
 
 
